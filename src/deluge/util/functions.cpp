@@ -2238,6 +2238,10 @@ Error fatfsErrorToDelugeError(FatFS::Error result) {
 
 char miscStringBuffer[kFilenameBufferSize] __attribute__((aligned(CACHE_LINE_SIZE)));
 char shortStringBuffer[kShortStringBufferSize] __attribute__((aligned(CACHE_LINE_SIZE)));
+// Dedicated buffer for the persisted global settings blob. Separate from miscStringBuffer (a 256-byte
+// scratch buffer reused across the UI) so the settings region can exceed one flash page without
+// overrunning scratch memory. Cache-line aligned to match the SPI flash DMA path.
+char flashSettingsBuffer[kFlashSettingsBufferSize] __attribute__((aligned(CACHE_LINE_SIZE)));
 
 float sigmoidLikeCurve(const float x, const float xMax, const float softening) {
 	const float raw = x / (x + softening);

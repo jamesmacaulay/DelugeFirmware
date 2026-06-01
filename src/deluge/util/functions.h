@@ -432,6 +432,7 @@ Error fatfsErrorToDelugeError(FatFS::Error result);
 }
 
 extern char miscStringBuffer[];
+extern char flashSettingsBuffer[];
 
 constexpr size_t kShortStringBufferSize = 64;
 extern char shortStringBuffer[];

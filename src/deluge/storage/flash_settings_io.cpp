@@ -33,12 +33,13 @@ void loadSettingsBuffer(std::span<uint8_t> buffer) {
 
 void persistSettingsBuffer(std::span<const uint8_t> buffer) {
 	R_SFLASH_EraseSector(kFlashSettingsBaseAddress, SPIBSC_CH, SPIBSC_CMNCR_BSZ_SINGLE, 1, SPIBSC_OUTPUT_ADDR_24);
-	// The firmware's existing behavior: a single Page Program. A SPI NOR Page Program cannot cross a
-	// 256-byte page boundary, so only the first page is ever written and anything past it is silently
-	// dropped. Replaced by a page-splitting loop in the next commit.
-	R_SFLASH_ByteProgram(kFlashSettingsBaseAddress, const_cast<uint8_t*>(buffer.data()),
-	                     static_cast<int32_t>(kFlashSettingsPageSize), SPIBSC_CH, SPIBSC_CMNCR_BSZ_SINGLE, SPIBSC_1BIT,
-	                     SPIBSC_OUTPUT_ADDR_24);
+	// A single SPI Page Program cannot cross a flash page boundary, so write one page at a time.
+	for (size_t offset = 0; offset < buffer.size(); offset += kFlashSettingsPageSize) {
+		const size_t chunk = std::min(kFlashSettingsPageSize, buffer.size() - offset);
+		R_SFLASH_ByteProgram(kFlashSettingsBaseAddress + offset, const_cast<uint8_t*>(buffer.data() + offset),
+		                     static_cast<int32_t>(chunk), SPIBSC_CH, SPIBSC_CMNCR_BSZ_SINGLE, SPIBSC_1BIT,
+		                     SPIBSC_OUTPUT_ADDR_24);
+	}
 }
 
 } // namespace FlashStorage

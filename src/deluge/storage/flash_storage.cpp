@@ -195,6 +195,14 @@ enum Entries {
 189: default patch cable polarity
 */
 
+// Size of the settings blob: highest byte index written in the map above (189) + 1. Keep this in sync
+// when adding settings -- if the blob outgrows the flash settings buffer the build fails here instead of
+// silently truncating on the device. (A documented tripwire, not per-write bounds checking.)
+constexpr size_t kSettingsBytesUsed = 190;
+static_assert(kSettingsBytesUsed <= kFlashSettingsBufferSize,
+              "settings layout has outgrown kFlashSettingsBufferSize -- raise the buffer (it must stay "
+              "within kFlashSettingsRegionSize)");
+
 uint8_t defaultScale;
 bool audioClipRecordMargins;
 KeyboardLayout keyboardLayout;
@@ -392,7 +400,7 @@ void resetAutomationSettings() {
 }
 
 void readSettings() {
-	std::span buffer{(uint8_t*)miscStringBuffer, kFilenameBufferSize};
+	std::span buffer{(uint8_t*)flashSettingsBuffer, kFlashSettingsBufferSize};
 	FlashStorage::loadSettingsBuffer(buffer);
 
 	settingsBeenRead = true;
@@ -882,7 +890,7 @@ static bool areAutomationSettingsValid(std::span<uint8_t> buffer) {
 }
 
 void writeSettings() {
-	std::span<uint8_t> buffer{(uint8_t*)miscStringBuffer, kFilenameBufferSize};
+	std::span<uint8_t> buffer{(uint8_t*)flashSettingsBuffer, kFlashSettingsBufferSize};
 	std::fill(buffer.begin(), buffer.end(), 0);
 
 	buffer[FIRMWARE_TYPE] = util::to_underlying(FirmwareVersion::current().type());
