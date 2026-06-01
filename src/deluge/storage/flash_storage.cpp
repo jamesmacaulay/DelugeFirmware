@@ -27,6 +27,7 @@
 #include "processing/engines/audio_engine.h"
 #include "processing/engines/cv_engine.h"
 #include "processing/metronome/metronome.h"
+#include "storage/flash_settings_io.h"
 #include "util/firmware_version.h"
 #include "util/functions.h"
 #include "util/misc.h"
@@ -392,8 +393,7 @@ void resetAutomationSettings() {
 
 void readSettings() {
 	std::span buffer{(uint8_t*)miscStringBuffer, kFilenameBufferSize};
-	R_SFLASH_ByteRead(0x80000 - 0x1000, buffer.data(), kFilenameBufferSize, SPIBSC_CH, SPIBSC_CMNCR_BSZ_SINGLE,
-	                  SPIBSC_1BIT, SPIBSC_OUTPUT_ADDR_24);
+	FlashStorage::loadSettingsBuffer(buffer);
 
 	settingsBeenRead = true;
 
@@ -1102,9 +1102,7 @@ void writeSettings() {
 
 	buffer[189] = util::to_underlying(defaultPatchCablePolarity);
 
-	R_SFLASH_EraseSector(0x80000 - 0x1000, SPIBSC_CH, SPIBSC_CMNCR_BSZ_SINGLE, 1, SPIBSC_OUTPUT_ADDR_24);
-	R_SFLASH_ByteProgram(0x80000 - 0x1000, buffer.data(), 256, SPIBSC_CH, SPIBSC_CMNCR_BSZ_SINGLE, SPIBSC_1BIT,
-	                     SPIBSC_OUTPUT_ADDR_24);
+	FlashStorage::persistSettingsBuffer(buffer);
 }
 
 } // namespace FlashStorage
