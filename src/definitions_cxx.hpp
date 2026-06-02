@@ -182,6 +182,19 @@ constexpr int32_t kNumInstrumentSlots = 1000;
 // Don't ever make this less! The zoom rendering code uses this buffer for its stuff
 constexpr size_t kFilenameBufferSize = 256;
 
+// Persistent global settings live in a dedicated SPI-flash sector at kFlashSettingsBaseAddress.
+// A SPI NOR Page Program command can only write within a single 256-byte page (it wraps the address
+// inside the page if a write crosses a boundary), so persisting the settings blob is split into
+// page-sized Program commands; reads have no such limit and can be done in one go.
+constexpr uint32_t kFlashSettingsBaseAddress = 0x80000 - 0x1000; // 0x7F000
+constexpr size_t kFlashSettingsRegionSize = 0x1000;              // 4096B reserved sector: 0x7F000..0x80000
+constexpr size_t kFlashSettingsPageSize = 256;                   // SPI Page Program granularity
+constexpr size_t kFlashSettingsBufferSize = 512;                 // raise as settings grow (bounded by asserts below)
+static_assert(kFlashSettingsBufferSize % kFlashSettingsPageSize == 0,
+              "settings buffer must be a whole number of flash pages so the write splits cleanly");
+static_assert(kFlashSettingsBufferSize <= kFlashSettingsRegionSize,
+              "settings buffer must fit within the reserved flash sector");
+
 /// Static enum representing which view a generic UI pointer actually represents.
 /// If you update this, also update the string translations in ui.cpp!
 enum class UIType : uint8_t {

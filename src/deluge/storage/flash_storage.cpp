@@ -27,6 +27,7 @@
 #include "processing/engines/audio_engine.h"
 #include "processing/engines/cv_engine.h"
 #include "processing/metronome/metronome.h"
+#include "storage/flash_settings_io.h"
 #include "util/firmware_version.h"
 #include "util/functions.h"
 #include "util/misc.h"
@@ -228,6 +229,16 @@ enum Entries {
 266-269: midiFollow set follow device track 16	product / vendor ids
 */
 
+// Size of the settings blob: highest byte index written by writeSettings/writeMidiFollowSettings + 1.
+// The MIDI-follow track mappings extend the layout out to buffer[269] (Track16 device ref), so 269 + 1.
+// Keep this in sync when adding settings -- if the blob outgrows the flash settings buffer the build
+// fails here instead of silently truncating on the device. (A documented tripwire, not per-write bounds
+// checking.)
+constexpr size_t kSettingsBytesUsed = 270;
+static_assert(kSettingsBytesUsed <= kFlashSettingsBufferSize,
+              "settings layout has outgrown kFlashSettingsBufferSize -- raise the buffer (it must stay "
+              "within kFlashSettingsRegionSize)");
+
 uint8_t defaultScale;
 bool audioClipRecordMargins;
 KeyboardLayout keyboardLayout;
@@ -425,9 +436,8 @@ void resetAutomationSettings() {
 }
 
 void readSettings() {
-	std::span buffer{(uint8_t*)miscStringBuffer, kFilenameBufferSize};
-	R_SFLASH_ByteRead(0x80000 - 0x1000, buffer.data(), kFilenameBufferSize, SPIBSC_CH, SPIBSC_CMNCR_BSZ_SINGLE,
-	                  SPIBSC_1BIT, SPIBSC_OUTPUT_ADDR_24);
+	std::span buffer{(uint8_t*)flashSettingsBuffer, kFlashSettingsBufferSize};
+	FlashStorage::loadSettingsBuffer(buffer);
 
 	settingsBeenRead = true;
 
@@ -1066,7 +1076,7 @@ static bool areAutomationSettingsValid(std::span<uint8_t> buffer) {
 }
 
 void writeSettings() {
-	std::span<uint8_t> buffer{(uint8_t*)miscStringBuffer, kFilenameBufferSize};
+	std::span<uint8_t> buffer{(uint8_t*)flashSettingsBuffer, kFlashSettingsBufferSize};
 	std::fill(buffer.begin(), buffer.end(), 0);
 
 	buffer[FIRMWARE_TYPE] = util::to_underlying(FirmwareVersion::current().type());
@@ -1267,9 +1277,7 @@ void writeSettings() {
 
 	buffer[189] = util::to_underlying(defaultPatchCablePolarity);
 
-	R_SFLASH_EraseSector(0x80000 - 0x1000, SPIBSC_CH, SPIBSC_CMNCR_BSZ_SINGLE, 1, SPIBSC_OUTPUT_ADDR_24);
-	R_SFLASH_ByteProgram(0x80000 - 0x1000, buffer.data(), 256, SPIBSC_CH, SPIBSC_CMNCR_BSZ_SINGLE, SPIBSC_1BIT,
-	                     SPIBSC_OUTPUT_ADDR_24);
+	FlashStorage::persistSettingsBuffer(buffer);
 }
 
 static void writeMidiFollowSettings(std::span<uint8_t> buffer) {

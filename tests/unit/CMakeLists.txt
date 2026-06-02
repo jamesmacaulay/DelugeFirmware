@@ -61,6 +61,8 @@ file(GLOB_RECURSE deluge_SOURCES
         ../../src/deluge/gui/ui/keyboard/chords.cpp
         # For clock output scheduler tests
         ../../src/deluge/playback/clock_output_scheduler.cpp
+        # For flash settings IO tests
+        ../../src/deluge/storage/flash_settings_io.cpp
 )
 
 add_executable(UnitTests
@@ -75,6 +77,7 @@ add_executable(UnitTests
         chord_tests.cpp
         time_tests.cpp
         clock_output_scheduler_tests.cpp
+        flash_settings_io_tests.cpp
 )
 add_test(NAME UnitTests
         COMMAND UnitTests)
