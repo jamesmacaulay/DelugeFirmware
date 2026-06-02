@@ -43,7 +43,7 @@ public:
 
 	ModelStackWithAutoParam* getModelStackWithParam(ModelStackWithTimelineCounter* modelStackWithTimelineCounter,
 	                                                Clip* clip, int32_t soundParamId, int32_t globalParamId,
-	                                                bool displayError = true);
+	                                                bool displayError = true, bool forceKitAffectEntire = false);
 	void noteMessageReceived(MIDICable& cable, bool on, int32_t channel, int32_t note, int32_t velocity,
 	                         bool* doingMidiThru, bool shouldRecordNotesNowNow, ModelStack* modelStack);
 	Output* sendNoteToClip(MIDICable& cable, Clip* clip, MIDIMatchType match, bool on, int32_t channel, int32_t note,
@@ -77,7 +77,8 @@ public:
 	void sendCCWithoutModelStackForMidiFollowFeedback(int32_t channel, bool isAutomation = false);
 	void sendCCForMidiFollowFeedback(int32_t channel, int32_t ccNumber, int32_t knobPos);
 
-	void handleReceivedCC(ModelStackWithTimelineCounter& modelStack, Clip* clip, int32_t ccNumber, int32_t ccValue);
+	void handleReceivedCC(ModelStackWithTimelineCounter& modelStack, Clip* clip, int32_t ccNumber, int32_t ccValue,
+	                      bool forceKitAffectEntire = false);
 
 private:
 	// initialize
@@ -124,13 +125,14 @@ private:
 	ModelStackWithAutoParam* getModelStackWithParamForSong(ModelStackWithThreeMainThings* modelStackWithThreeMainThings,
 	                                                       int32_t soundParamId, int32_t globalParamId);
 	ModelStackWithAutoParam* getModelStackWithParamForClip(ModelStackWithTimelineCounter* modelStackWithTimelineCounter,
-	                                                       Clip* clip, int32_t soundParamId, int32_t globalParamId);
+	                                                       Clip* clip, int32_t soundParamId, int32_t globalParamId,
+	                                                       bool forceKitAffectEntire = false);
 	ModelStackWithAutoParam*
 	getModelStackWithParamForSynthClip(ModelStackWithTimelineCounter* modelStackWithTimelineCounter, Clip* clip,
 	                                   int32_t soundParamId, int32_t globalParamId);
 	ModelStackWithAutoParam*
 	getModelStackWithParamForKitClip(ModelStackWithTimelineCounter* modelStackWithTimelineCounter, Clip* clip,
-	                                 int32_t soundParamId, int32_t globalParamId);
+	                                 int32_t soundParamId, int32_t globalParamId, bool forceKitAffectEntire = false);
 	ModelStackWithAutoParam*
 	getModelStackWithParamForAudioClip(ModelStackWithTimelineCounter* modelStackWithTimelineCounter, Clip* clip,
 	                                   int32_t soundParamId, int32_t globalParamId);

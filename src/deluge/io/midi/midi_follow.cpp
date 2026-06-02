@@ -434,14 +434,15 @@ Output* MidiFollow::getTrackFromIndex(uint32_t track_index, uint32_t maxTrack) {
 /// obtain the modelStackWithParam for that context and return it so it can be used by midi follow
 ModelStackWithAutoParam*
 MidiFollow::getModelStackWithParam(ModelStackWithTimelineCounter* modelStackWithTimelineCounter, Clip* clip,
-                                   int32_t soundParamId, int32_t globalParamId, bool displayError) {
+                                   int32_t soundParamId, int32_t globalParamId, bool displayError,
+                                   bool forceKitAffectEntire) {
 	ModelStackWithAutoParam* modelStackWithParam = nullptr;
 
 	// non-null clip means you're dealing with the clip context
 	if (clip) {
 		if (modelStackWithTimelineCounter) {
-			modelStackWithParam =
-			    getModelStackWithParamForClip(modelStackWithTimelineCounter, clip, soundParamId, globalParamId);
+			modelStackWithParam = getModelStackWithParamForClip(modelStackWithTimelineCounter, clip, soundParamId,
+			                                                    globalParamId, forceKitAffectEntire);
 		}
 	}
 
@@ -454,7 +455,7 @@ MidiFollow::getModelStackWithParam(ModelStackWithTimelineCounter* modelStackWith
 
 ModelStackWithAutoParam*
 MidiFollow::getModelStackWithParamForClip(ModelStackWithTimelineCounter* modelStackWithTimelineCounter, Clip* clip,
-                                          int32_t soundParamId, int32_t globalParamId) {
+                                          int32_t soundParamId, int32_t globalParamId, bool forceKitAffectEntire) {
 	ModelStackWithAutoParam* modelStackWithParam = nullptr;
 	OutputType outputType = clip->output->type;
 
@@ -464,8 +465,8 @@ MidiFollow::getModelStackWithParamForClip(ModelStackWithTimelineCounter* modelSt
 		    getModelStackWithParamForSynthClip(modelStackWithTimelineCounter, clip, soundParamId, globalParamId);
 		break;
 	case OutputType::KIT:
-		modelStackWithParam =
-		    getModelStackWithParamForKitClip(modelStackWithTimelineCounter, clip, soundParamId, globalParamId);
+		modelStackWithParam = getModelStackWithParamForKitClip(modelStackWithTimelineCounter, clip, soundParamId,
+		                                                       globalParamId, forceKitAffectEntire);
 		break;
 	case OutputType::AUDIO:
 		modelStackWithParam =
@@ -506,13 +507,17 @@ MidiFollow::getModelStackWithParamForSynthClip(ModelStackWithTimelineCounter* mo
 
 ModelStackWithAutoParam*
 MidiFollow::getModelStackWithParamForKitClip(ModelStackWithTimelineCounter* modelStackWithTimelineCounter, Clip* clip,
-                                             int32_t soundParamId, int32_t globalParamId) {
+                                             int32_t soundParamId, int32_t globalParamId, bool forceKitAffectEntire) {
 	ModelStackWithAutoParam* modelStackWithParam = nullptr;
 	params::Kind paramKind = params::Kind::NONE;
 	int32_t paramID = PARAM_ID_NONE;
 	InstrumentClip* instrumentClip = (InstrumentClip*)clip;
 
-	if (!instrumentClip->affectEntire) {
+	// Track-locked midi follow always targets the whole kit, regardless of the clip's live "affect entire"
+	// state, so CC control of a kit on a CHANNEL TRACK config is deterministic.
+	bool affectEntire = instrumentClip->affectEntire || forceKitAffectEntire;
+
+	if (!affectEntire) {
 		if (soundParamId != PARAM_ID_NONE && soundParamId < params::UNPATCHED_START) {
 			paramKind = params::Kind::PATCHED;
 			paramID = soundParamId;
@@ -535,7 +540,7 @@ MidiFollow::getModelStackWithParamForKitClip(ModelStackWithTimelineCounter* mode
 	if ((paramKind != params::Kind::NONE) && (paramID != PARAM_ID_NONE)) {
 		// Note: useMenuContext parameter will always be false for MidiFollow
 		modelStackWithParam = clip->output->getModelStackWithParam(modelStackWithTimelineCounter, clip, paramID,
-		                                                           paramKind, instrumentClip->affectEntire, false);
+		                                                           paramKind, affectEntire, false);
 	}
 
 	return modelStackWithParam;
@@ -934,8 +939,10 @@ void MidiFollow::midiCCReceivedForSpecificTrack(MIDICable& cable, uint8_t channe
 					auto modelStackWithTimelineCounter = modelStack->addTimelineCounter(clip);
 
 					if (modelStackWithTimelineCounter) {
-						// See if it's learned to a parameter
-						handleReceivedCC(*modelStackWithTimelineCounter, clip, ccNumber, ccValue);
+						// See if it's learned to a parameter. A track-locked config that points at a kit always
+						// controls kit-global parameters, so force the "affect entire" path here.
+						handleReceivedCC(*modelStackWithTimelineCounter, clip, ccNumber, ccValue,
+						                 /*forceKitAffectEntire=*/true);
 					}
 				}
 			}
@@ -963,7 +970,7 @@ void MidiFollow::midiCCReceivedForSpecificTrack(MIDICable& cable, uint8_t channe
 /// this function works by first checking the active context to see if there is an active clip
 /// to determine if the cc intends to control a song level or clip level parameter
 void MidiFollow::handleReceivedCC(ModelStackWithTimelineCounter& modelStackWithTimelineCounter, Clip* clip,
-                                  int32_t ccNumber, int32_t ccValue) {
+                                  int32_t ccNumber, int32_t ccValue, bool forceKitAffectEntire) {
 
 	int32_t modPos = 0;
 	int32_t modLength = 0;
@@ -991,8 +998,9 @@ void MidiFollow::handleReceivedCC(ModelStackWithTimelineCounter& modelStackWithT
 		return;
 	}
 
-	ModelStackWithAutoParam* modelStackWithParam = getModelStackWithParam(
-	    &modelStackWithTimelineCounter, clip, soundParamId, globalParamId, midiEngine.midiFollowDisplayParam);
+	ModelStackWithAutoParam* modelStackWithParam =
+	    getModelStackWithParam(&modelStackWithTimelineCounter, clip, soundParamId, globalParamId,
+	                           midiEngine.midiFollowDisplayParam, forceKitAffectEntire);
 	// check if model stack is valid
 	if (modelStackWithParam && modelStackWithParam->autoParam) {
 		int32_t currentValue;
