@@ -430,19 +430,72 @@ Output* MidiFollow::getTrackFromIndex(uint32_t track_index, uint32_t maxTrack) {
 	return nullptr;
 }
 
+/// Enumerate the song's addressable kit rows into `out` (up to maxRows), in one pass over the output list.
+/// Kit rows follow CHANNEL TRACK ordering (getTrackFromIndex order) and go bottom note row (index 0) upward
+/// within each kit, skipping rows that have no drum. Returns the number written. Called once per incoming
+/// MIDI message, so the per-row dispatch doesn't re-walk the output list.
+///
+/// NOTE: kit-row mapping is *positional and stateless*, like CHANNEL TRACK. "Kit Row N" is whatever drum
+/// currently sits at enumeration position N, so adding/removing/reordering drums (or kits) silently remaps
+/// a learned channel to a different drum. Routing is also re-resolved per message (no per-note memory like
+/// clipForLastNoteReceived), so changing the kit-row set between a note-on and its note-off can route the
+/// note-off to a different drum. These are accepted v1 limitations; see the feature's user docs/release notes.
+bool MidiFollow::anyKitRowLearned() {
+	for (int32_t i = kMidiFollowFirstKitRowType; i < kNumMIDIFollowChannelTypesIncludingTracksAndRows; ++i) {
+		if (midiEngine.midiFollowChannelType[i].containsSomething()) {
+			return true;
+		}
+	}
+	return false;
+}
+
+size_t MidiFollow::enumerateKitRows(MidiFollowKitRow* out, size_t maxRows) {
+	// Nothing learned -> skip the output-list walk below so kit rows cost nothing when unused. This is the
+	// common case (most songs have no kit-row configs), and every note/CC/pitch-bend/aftertouch message would
+	// otherwise pay for the walk.
+	if (!anyKitRowLearned()) {
+		return 0;
+	}
+
+	size_t count = 0;
+	auto trackCount = getTrackCount();
+	for (uint32_t trackIndex = 0; trackIndex < trackCount && count < maxRows; ++trackIndex) {
+		Output* track = getTrackFromIndex(trackIndex, trackCount);
+		if (track == nullptr || track->type != OutputType::KIT) {
+			continue;
+		}
+		Clip* clip = track->getActiveClip();
+		if (clip == nullptr) {
+			continue;
+		}
+		auto* instrumentClip = (InstrumentClip*)clip;
+		int32_t numRows = instrumentClip->noteRows.getNumElements();
+		for (int32_t i = 0; i < numRows && count < maxRows; ++i) {
+			// getElement returns a valid pointer for any in-range index, so noteRow is never null here;
+			// we only skip rows that have no drum assigned.
+			NoteRow* noteRow = instrumentClip->noteRows.getElement(i);
+			if (noteRow->drum == nullptr) {
+				continue;
+			}
+			out[count++] = {(Kit*)track, instrumentClip, noteRow->drum};
+		}
+	}
+	return count;
+}
+
 /// based on the current context, as determined by clip returned from the getSelectedClip function
 /// obtain the modelStackWithParam for that context and return it so it can be used by midi follow
 ModelStackWithAutoParam*
 MidiFollow::getModelStackWithParam(ModelStackWithTimelineCounter* modelStackWithTimelineCounter, Clip* clip,
                                    int32_t soundParamId, int32_t globalParamId, bool displayError,
-                                   bool forceKitAffectEntire) {
+                                   bool forceKitAffectEntire, Drum* targetKitRowDrum) {
 	ModelStackWithAutoParam* modelStackWithParam = nullptr;
 
 	// non-null clip means you're dealing with the clip context
 	if (clip) {
 		if (modelStackWithTimelineCounter) {
 			modelStackWithParam = getModelStackWithParamForClip(modelStackWithTimelineCounter, clip, soundParamId,
-			                                                    globalParamId, forceKitAffectEntire);
+			                                                    globalParamId, forceKitAffectEntire, targetKitRowDrum);
 		}
 	}
 
@@ -455,7 +508,8 @@ MidiFollow::getModelStackWithParam(ModelStackWithTimelineCounter* modelStackWith
 
 ModelStackWithAutoParam*
 MidiFollow::getModelStackWithParamForClip(ModelStackWithTimelineCounter* modelStackWithTimelineCounter, Clip* clip,
-                                          int32_t soundParamId, int32_t globalParamId, bool forceKitAffectEntire) {
+                                          int32_t soundParamId, int32_t globalParamId, bool forceKitAffectEntire,
+                                          Drum* targetKitRowDrum) {
 	ModelStackWithAutoParam* modelStackWithParam = nullptr;
 	OutputType outputType = clip->output->type;
 
@@ -466,7 +520,7 @@ MidiFollow::getModelStackWithParamForClip(ModelStackWithTimelineCounter* modelSt
 		break;
 	case OutputType::KIT:
 		modelStackWithParam = getModelStackWithParamForKitClip(modelStackWithTimelineCounter, clip, soundParamId,
-		                                                       globalParamId, forceKitAffectEntire);
+		                                                       globalParamId, forceKitAffectEntire, targetKitRowDrum);
 		break;
 	case OutputType::AUDIO:
 		modelStackWithParam =
@@ -507,11 +561,34 @@ MidiFollow::getModelStackWithParamForSynthClip(ModelStackWithTimelineCounter* mo
 
 ModelStackWithAutoParam*
 MidiFollow::getModelStackWithParamForKitClip(ModelStackWithTimelineCounter* modelStackWithTimelineCounter, Clip* clip,
-                                             int32_t soundParamId, int32_t globalParamId, bool forceKitAffectEntire) {
+                                             int32_t soundParamId, int32_t globalParamId, bool forceKitAffectEntire,
+                                             Drum* targetKitRowDrum) {
 	ModelStackWithAutoParam* modelStackWithParam = nullptr;
 	params::Kind paramKind = params::Kind::NONE;
 	int32_t paramID = PARAM_ID_NONE;
 	InstrumentClip* instrumentClip = (InstrumentClip*)clip;
+
+	// CHANNEL KIT ROW config: control this specific drum's sound params (deterministic, independent of the
+	// kit's selected drum / affect-entire state).
+	if (targetKitRowDrum != nullptr) {
+		if (soundParamId != PARAM_ID_NONE && soundParamId < params::UNPATCHED_START) {
+			paramKind = params::Kind::PATCHED;
+			paramID = soundParamId;
+		}
+		else if (soundParamId != PARAM_ID_NONE && soundParamId >= params::UNPATCHED_START) {
+			// don't allow control of Portamento in Kit's
+			if (soundParamId - params::UNPATCHED_START != params::UNPATCHED_PORTAMENTO) {
+				paramKind = params::Kind::UNPATCHED_SOUND;
+				paramID = soundParamId - params::UNPATCHED_START;
+			}
+		}
+		if ((paramKind != params::Kind::NONE) && (paramID != PARAM_ID_NONE)) {
+			modelStackWithParam = ((Kit*)clip->output)
+			                          ->getModelStackWithParamForDrum(modelStackWithTimelineCounter, clip,
+			                                                          targetKitRowDrum, paramID, paramKind, false);
+		}
+		return modelStackWithParam;
+	}
 
 	// Track-locked midi follow always targets the whole kit, regardless of the clip's live "affect entire"
 	// state, so CC control of a kit on a CHANNEL TRACK config is deterministic.
@@ -693,6 +770,16 @@ void MidiFollow::noteMessageReceived(MIDICable& cable, bool on, int32_t channel,
 			}
 		}
 	}
+
+	// then try to process note received through kit-row midi follow channels (KitRow1-16). A kit row is a
+	// sub-target of a track, so unlike the track loop above we don't suppress against selected_track.
+	MidiFollowKitRow kitRows[kNumMidiFollowKitRowTypes];
+	size_t kit_row_count = enumerateKitRows(kitRows, kNumMidiFollowKitRowTypes);
+	for (size_t kit_row_index = 0; kit_row_index < kit_row_count; ++kit_row_index) {
+		noteMessageReceivedForKitRow(cable, on, channel, note, velocity, doingMidiThru, shouldRecordNotesNowNow,
+		                             modelStack, kitRows[kit_row_index].clip, kitRows[kit_row_index].drum,
+		                             static_cast<int32_t>(kit_row_index));
+	}
 }
 
 /// determines whether a midi note received is midi follow relevant
@@ -756,9 +843,34 @@ void MidiFollow::noteMessageReceivedForSpecificTrack(MIDICable& cable, bool on, 
 	}
 }
 
+/// determines whether a midi note received is midi follow relevant
+/// and should be routed to a specific kit row (a single drum) for further processing
+void MidiFollow::noteMessageReceivedForKitRow(MIDICable& cable, bool on, int32_t channel, int32_t note,
+                                              int32_t velocity, bool* doingMidiThru, bool shouldRecordNotesNowNow,
+                                              ModelStack* modelStack, InstrumentClip* clip, Drum* drum,
+                                              int32_t kit_row_index) {
+	MIDIMatchType match = checkMidiFollowMatchForKitRow(cable, channel, kit_row_index);
+	if (match != MIDIMatchType::NO_MATCH) {
+		if (note >= 0 && note <= 127) {
+			sendNoteToClip(cable, clip, match, on, channel, note, velocity, doingMidiThru, shouldRecordNotesNowNow,
+			               modelStack, false, drum);
+		}
+		// All notes off. A kit row triggers its drum regardless of note number, but a held note could have
+		// come in on any note, so we send a note-off for each note rather than assume one clears the drum's
+		// voice -- matching the per-note all-notes-off handling on the track/active-clip paths. (This path is
+		// rare -- panic / playback stop -- so the per-note loop isn't worth optimizing away.)
+		else if (note == ALL_NOTES_OFF) {
+			for (int32_t i = 0; i <= 127; i++) {
+				sendNoteToClip(cable, clip, match, on, channel, i, velocity, doingMidiThru, shouldRecordNotesNowNow,
+				               modelStack, false, drum);
+			}
+		}
+	}
+}
+
 Output* MidiFollow::sendNoteToClip(MIDICable& cable, Clip* clip, MIDIMatchType match, bool on, int32_t channel,
                                    int32_t note, int32_t velocity, bool* doingMidiThru, bool shouldRecordNotesNowNow,
-                                   ModelStack* modelStack, bool updateClipForLastNoteReceived) {
+                                   ModelStack* modelStack, bool updateClipForLastNoteReceived, Drum* targetDrum) {
 	Output* selected_track = nullptr;
 
 	// Only send if not muted - but let note-offs through always, for safety
@@ -772,9 +884,17 @@ Output* MidiFollow::sendNoteToClip(MIDICable& cable, Clip* clip, MIDIMatchType m
 			bool shouldRecordNotes = shouldRecordNotesNowNow && currentSong->isOutputActiveInArrangement(clip->output);
 			if (clip->output->type == OutputType::KIT) {
 				auto kit = (Kit*)clip->output;
-				kit->receivedNoteForKit(modelStackWithTimelineCounter, cable, on, channel,
-				                        note - midiEngine.midiFollowKitRootNote, velocity, shouldRecordNotes,
-				                        doingMidiThru, (InstrumentClip*)clip);
+				if (targetDrum != nullptr) {
+					// KIT ROW config: trigger exactly this drum, ignoring the incoming note number for
+					// selection (and skipping the kit root-note transpose).
+					kit->receivedNoteForDrum(modelStackWithTimelineCounter, cable, on, channel, note, velocity,
+					                         shouldRecordNotes, doingMidiThru, targetDrum);
+				}
+				else {
+					kit->receivedNoteForKit(modelStackWithTimelineCounter, cable, on, channel,
+					                        note - midiEngine.midiFollowKitRootNote, velocity, shouldRecordNotes,
+					                        doingMidiThru, (InstrumentClip*)clip);
+				}
 			}
 			else {
 				MelodicInstrument* melodicInstrument = (MelodicInstrument*)clip->output;
@@ -826,6 +946,15 @@ void MidiFollow::midiCCReceived(MIDICable& cable, uint8_t channel, uint8_t ccNum
 				                               track_index);
 			}
 		}
+	}
+
+	// then try to process cc received through kit-row midi follow channels (KitRow1-16)
+	MidiFollowKitRow kitRows[kNumMidiFollowKitRowTypes];
+	size_t kit_row_count = enumerateKitRows(kitRows, kNumMidiFollowKitRowTypes);
+	for (size_t kit_row_index = 0; kit_row_index < kit_row_count; ++kit_row_index) {
+		midiCCReceivedForKitRow(cable, channel, ccNumber, ccValue, doingMidiThru, modelStack,
+		                        kitRows[kit_row_index].clip, kitRows[kit_row_index].drum,
+		                        static_cast<int32_t>(kit_row_index));
 	}
 }
 
@@ -939,8 +1068,9 @@ void MidiFollow::midiCCReceivedForSpecificTrack(MIDICable& cable, uint8_t channe
 					auto modelStackWithTimelineCounter = modelStack->addTimelineCounter(clip);
 
 					if (modelStackWithTimelineCounter) {
-						// See if it's learned to a parameter. A track-locked config that points at a kit always
-						// controls kit-global parameters, so force the "affect entire" path here.
+						// See if it's learned to a parameter
+						// CHANNEL TRACK config: force kit-global param control so it doesn't depend on the
+						// clip's live affect-entire / selected-row state.
 						handleReceivedCC(*modelStackWithTimelineCounter, clip, ccNumber, ccValue,
 						                 /*forceKitAffectEntire=*/true);
 					}
@@ -965,12 +1095,42 @@ void MidiFollow::midiCCReceivedForSpecificTrack(MIDICable& cable, uint8_t channe
 	}
 }
 
+/// determines whether a midi cc received is midi follow relevant
+/// and should be routed to a specific kit row (a single drum) for further processing.
+/// only does internal parameter control (a kit row is a single sound drum); it does not forward the CC to
+/// the kit via receivedCCForKit (that path is for whole-kit MPE handling).
+void MidiFollow::midiCCReceivedForKitRow(MIDICable& cable, uint8_t channel, uint8_t ccNumber, uint8_t ccValue,
+                                         bool* doingMidiThru, ModelStack* modelStack, InstrumentClip* clip, Drum* drum,
+                                         int32_t kit_row_index) {
+	MIDIMatchType match = checkMidiFollowMatchForKitRow(cable, channel, kit_row_index);
+	if (match != MIDIMatchType::NO_MATCH) {
+		if (clip && (match == MIDIMatchType::MPE_MASTER || match == MIDIMatchType::CHANNEL)) {
+			// feedback filter: skip if we recently sent this cc as midi follow feedback (mirrors the track path)
+			if (!isFeedbackEnabled()
+			    || (isFeedbackEnabled()
+			        && (!midiEngine.midiFollowFeedbackFilter
+			            || (midiEngine.midiFollowFeedbackFilter
+			                && ((AudioEngine::audioSampleTimer - timeLastCCSent[ccNumber]) >= kSampleRate))))) {
+				if (modelStack) {
+					auto modelStackWithTimelineCounter = modelStack->addTimelineCounter(clip);
+					if (modelStackWithTimelineCounter) {
+						// scope param control to this specific drum
+						handleReceivedCC(*modelStackWithTimelineCounter, clip, ccNumber, ccValue,
+						                 /*forceKitAffectEntire=*/false, /*targetKitRowDrum=*/drum);
+					}
+				}
+			}
+		}
+	}
+}
+
 /// checks if the ccNumber received has been learned to any parameters in midi learning view
 /// if the cc has been learned, it sets the new value for that parameter
 /// this function works by first checking the active context to see if there is an active clip
 /// to determine if the cc intends to control a song level or clip level parameter
 void MidiFollow::handleReceivedCC(ModelStackWithTimelineCounter& modelStackWithTimelineCounter, Clip* clip,
-                                  int32_t ccNumber, int32_t ccValue, bool forceKitAffectEntire) {
+                                  int32_t ccNumber, int32_t ccValue, bool forceKitAffectEntire,
+                                  Drum* targetKitRowDrum) {
 
 	int32_t modPos = 0;
 	int32_t modLength = 0;
@@ -1000,7 +1160,7 @@ void MidiFollow::handleReceivedCC(ModelStackWithTimelineCounter& modelStackWithT
 
 	ModelStackWithAutoParam* modelStackWithParam =
 	    getModelStackWithParam(&modelStackWithTimelineCounter, clip, soundParamId, globalParamId,
-	                           midiEngine.midiFollowDisplayParam, forceKitAffectEntire);
+	                           midiEngine.midiFollowDisplayParam, forceKitAffectEntire, targetKitRowDrum);
 	// check if model stack is valid
 	if (modelStackWithParam && modelStackWithParam->autoParam) {
 		int32_t currentValue;
@@ -1229,6 +1389,15 @@ void MidiFollow::pitchBendReceived(MIDICable& cable, uint8_t channel, uint8_t da
 			}
 		}
 	}
+
+	// then try to process pitch bend received through kit-row midi follow channels (KitRow1-16)
+	MidiFollowKitRow kitRows[kNumMidiFollowKitRowTypes];
+	size_t kit_row_count = enumerateKitRows(kitRows, kNumMidiFollowKitRowTypes);
+	for (size_t kit_row_index = 0; kit_row_index < kit_row_count; ++kit_row_index) {
+		pitchBendReceivedForKitRow(cable, channel, data1, data2, doingMidiThru, modelStack, kitRows[kit_row_index].kit,
+		                           kitRows[kit_row_index].clip, kitRows[kit_row_index].drum,
+		                           static_cast<int32_t>(kit_row_index));
+	}
 }
 
 /// determines whether a pitch bend received is midi follow relevant
@@ -1292,6 +1461,21 @@ void MidiFollow::pitchBendReceivedForSpecificTrack(MIDICable& cable, uint8_t cha
 	}
 }
 
+/// determines whether a pitch bend received is midi follow relevant
+/// and should be routed to a specific kit row (a single drum) for further processing
+void MidiFollow::pitchBendReceivedForKitRow(MIDICable& cable, uint8_t channel, uint8_t data1, uint8_t data2,
+                                            bool* doingMidiThru, ModelStack* modelStack, Kit* kit, InstrumentClip* clip,
+                                            Drum* drum, int32_t kit_row_index) {
+	MIDIMatchType match = checkMidiFollowMatchForKitRow(cable, channel, kit_row_index);
+	if (match != MIDIMatchType::NO_MATCH) {
+		ModelStackWithTimelineCounter* modelStackWithTimelineCounter = modelStack->addTimelineCounter(clip);
+		if (modelStackWithTimelineCounter) {
+			kit->receivedPitchBendForDrum(modelStackWithTimelineCounter, drum, data1, data2, match, channel,
+			                              doingMidiThru);
+		}
+	}
+}
+
 /// called from playback handler
 /// determines whether aftertouch received is midi follow relevant
 /// and should be routed to the active context or a specific track for further processing
@@ -1321,6 +1505,16 @@ void MidiFollow::aftertouchReceived(MIDICable& cable, int32_t channel, int32_t v
 				                                   track_index);
 			}
 		}
+	}
+
+	// then try to process aftertouch received through kit-row midi follow channels (KitRow1-16). The kit row
+	// is a single drum, so the incoming noteCode is ignored for targeting (any aftertouch hits that drum).
+	MidiFollowKitRow kitRows[kNumMidiFollowKitRowTypes];
+	size_t kit_row_count = enumerateKitRows(kitRows, kNumMidiFollowKitRowTypes);
+	for (size_t kit_row_index = 0; kit_row_index < kit_row_count; ++kit_row_index) {
+		aftertouchReceivedForKitRow(cable, channel, value, doingMidiThru, modelStack, kitRows[kit_row_index].kit,
+		                            kitRows[kit_row_index].clip, kitRows[kit_row_index].drum,
+		                            static_cast<int32_t>(kit_row_index));
 	}
 }
 
@@ -1385,6 +1579,20 @@ void MidiFollow::aftertouchReceivedForSpecificTrack(MIDICable& cable, int32_t ch
 	}
 }
 
+/// determines whether aftertouch received is midi follow relevant
+/// and should be routed to a specific kit row (a single drum) for further processing
+void MidiFollow::aftertouchReceivedForKitRow(MIDICable& cable, int32_t channel, int32_t value, bool* doingMidiThru,
+                                             ModelStack* modelStack, Kit* kit, InstrumentClip* clip, Drum* drum,
+                                             int32_t kit_row_index) {
+	MIDIMatchType match = checkMidiFollowMatchForKitRow(cable, channel, kit_row_index);
+	if (match != MIDIMatchType::NO_MATCH) {
+		ModelStackWithTimelineCounter* modelStackWithTimelineCounter = modelStack->addTimelineCounter(clip);
+		if (modelStackWithTimelineCounter) {
+			kit->receivedAftertouchForDrum(modelStackWithTimelineCounter, drum, match, channel, value);
+		}
+	}
+}
+
 /// obtain match to check if device is compatible with the midi follow channel
 /// a valid match is passed through to the instruments for further evaluation
 /// used with regular midi follow channels A/B/C
@@ -1407,6 +1615,18 @@ MIDIMatchType MidiFollow::checkMidiFollowMatchForSpecificTrack(MIDICable& cable,
 	MIDIMatchType m = MIDIMatchType::NO_MATCH;
 	auto i = kNumMIDIFollowChannelTypes + specific_track_index;
 	if (i < kNumMIDIFollowChannelTypesIncludingTracks) {
+		m = midiEngine.midiFollowChannelType[i].checkMatch(&cable, channel);
+		if (m != MIDIMatchType::NO_MATCH) {
+			return m;
+		}
+	}
+	return m;
+}
+
+MIDIMatchType MidiFollow::checkMidiFollowMatchForKitRow(MIDICable& cable, uint8_t channel, int32_t kit_row_index) {
+	MIDIMatchType m = MIDIMatchType::NO_MATCH;
+	auto i = kMidiFollowFirstKitRowType + kit_row_index;
+	if (i < kNumMIDIFollowChannelTypesIncludingTracksAndRows) {
 		m = midiEngine.midiFollowChannelType[i].checkMatch(&cable, channel);
 		if (m != MIDIMatchType::NO_MATCH) {
 			return m;

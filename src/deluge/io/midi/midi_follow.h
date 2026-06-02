@@ -36,6 +36,13 @@ enum class MIDIMatchType;
 
 namespace params = deluge::modulation::params;
 
+/// One addressable kit row, resolved from the song's kits for midi-follow dispatch.
+struct MidiFollowKitRow {
+	Kit* kit;
+	InstrumentClip* clip;
+	Drum* drum;
+};
+
 class MidiFollow final {
 public:
 	MidiFollow();
@@ -43,12 +50,13 @@ public:
 
 	ModelStackWithAutoParam* getModelStackWithParam(ModelStackWithTimelineCounter* modelStackWithTimelineCounter,
 	                                                Clip* clip, int32_t soundParamId, int32_t globalParamId,
-	                                                bool displayError = true, bool forceKitAffectEntire = false);
+	                                                bool displayError = true, bool forceKitAffectEntire = false,
+	                                                Drum* targetKitRowDrum = nullptr);
 	void noteMessageReceived(MIDICable& cable, bool on, int32_t channel, int32_t note, int32_t velocity,
 	                         bool* doingMidiThru, bool shouldRecordNotesNowNow, ModelStack* modelStack);
 	Output* sendNoteToClip(MIDICable& cable, Clip* clip, MIDIMatchType match, bool on, int32_t channel, int32_t note,
 	                       int32_t velocity, bool* doingMidiThru, bool shouldRecordNotesNowNow, ModelStack* modelStack,
-	                       bool updateClipForLastNoteReceived = true);
+	                       bool updateClipForLastNoteReceived = true, Drum* targetDrum = nullptr);
 	void midiCCReceived(MIDICable& cable, uint8_t channel, uint8_t ccNumber, uint8_t ccValue, bool* doingMidiThru,
 	                    ModelStack* modelStack);
 	void pitchBendReceived(MIDICable& cable, uint8_t channel, uint8_t data1, uint8_t data2, bool* doingMidiThru,
@@ -78,7 +86,7 @@ public:
 	void sendCCForMidiFollowFeedback(int32_t channel, int32_t ccNumber, int32_t knobPos);
 
 	void handleReceivedCC(ModelStackWithTimelineCounter& modelStack, Clip* clip, int32_t ccNumber, int32_t ccValue,
-	                      bool forceKitAffectEntire = false);
+	                      bool forceKitAffectEntire = false, Drum* targetKitRowDrum = nullptr);
 
 private:
 	// initialize
@@ -94,12 +102,18 @@ private:
 	void noteMessageReceivedForSpecificTrack(MIDICable& cable, bool on, int32_t channel, int32_t note, int32_t velocity,
 	                                         bool* doingMidiThru, bool shouldRecordNotesNowNow, ModelStack* modelStack,
 	                                         Output* specific_track, int32_t specific_track_index);
+	void noteMessageReceivedForKitRow(MIDICable& cable, bool on, int32_t channel, int32_t note, int32_t velocity,
+	                                  bool* doingMidiThru, bool shouldRecordNotesNowNow, ModelStack* modelStack,
+	                                  InstrumentClip* clip, Drum* drum, int32_t kit_row_index);
 	// cc received
 	Output* midiCCReceivedForSelectedOrActiveClip(MIDICable& cable, uint8_t channel, uint8_t ccNumber, uint8_t ccValue,
 	                                              bool* doingMidiThru, ModelStack* modelStack);
 	void midiCCReceivedForSpecificTrack(MIDICable& cable, uint8_t channel, uint8_t ccNumber, uint8_t ccValue,
 	                                    bool* doingMidiThru, ModelStack* modelStack, Output* specific_track,
 	                                    int32_t specific_track_index);
+	void midiCCReceivedForKitRow(MIDICable& cable, uint8_t channel, uint8_t ccNumber, uint8_t ccValue,
+	                             bool* doingMidiThru, ModelStack* modelStack, InstrumentClip* clip, Drum* drum,
+	                             int32_t kit_row_index);
 
 	// pitch bend received
 	Output* pitchBendReceivedForSelectedOrActiveClip(MIDICable& cable, uint8_t channel, uint8_t data1, uint8_t data2,
@@ -107,6 +121,9 @@ private:
 	void pitchBendReceivedForSpecificTrack(MIDICable& cable, uint8_t channel, uint8_t data1, uint8_t data2,
 	                                       bool* doingMidiThru, ModelStack* modelStack, Output* specific_track,
 	                                       int32_t specific_track_index);
+	void pitchBendReceivedForKitRow(MIDICable& cable, uint8_t channel, uint8_t data1, uint8_t data2,
+	                                bool* doingMidiThru, ModelStack* modelStack, Kit* kit, InstrumentClip* clip,
+	                                Drum* drum, int32_t kit_row_index);
 
 	// after touch received
 	Output* aftertouchReceivedForSelectedOrActiveClip(MIDICable& cable, int32_t channel, int32_t value,
@@ -114,25 +131,38 @@ private:
 	void aftertouchReceivedForSpecificTrack(MIDICable& cable, int32_t channel, int32_t value, int32_t noteCode,
 	                                        bool* doingMidiThru, ModelStack* modelStack, Output* specific_track,
 	                                        int32_t specific_track_index);
+	void aftertouchReceivedForKitRow(MIDICable& cable, int32_t channel, int32_t value, bool* doingMidiThru,
+	                                 ModelStack* modelStack, Kit* kit, InstrumentClip* clip, Drum* drum,
+	                                 int32_t kit_row_index);
 
 	Clip* getSelectedOrActiveClip();
 	Clip* getSelectedClip();
 	Clip* getActiveClip(ModelStack* modelStack);
 	[[nodiscard]] const size_t getTrackCount() const;
 	Output* getTrackFromIndex(uint32_t trackIndex, uint32_t maxTrack);
+	// True if any CHANNEL KIT ROW config has a channel learned. Used to skip kit-row enumeration entirely
+	// (and its output-list walk) on every incoming MIDI message when the feature isn't in use.
+	bool anyKitRowLearned();
+	// Enumerate the song's addressable kit rows (for the CHANNEL KIT ROW configs) into `out`, in the same
+	// order as CHANNEL TRACK numbering and bottom-to-top within each kit. Returns the count (<= maxRows).
+	// Done once per incoming MIDI message so the output list isn't re-walked per row. Returns 0 immediately
+	// when no kit-row config is learned, so the walk costs nothing for songs/users not using the feature.
+	size_t enumerateKitRows(MidiFollowKitRow* out, size_t maxRows);
 
 	// get model stack with auto param for midi follow cc-param control
 	ModelStackWithAutoParam* getModelStackWithParamForSong(ModelStackWithThreeMainThings* modelStackWithThreeMainThings,
 	                                                       int32_t soundParamId, int32_t globalParamId);
 	ModelStackWithAutoParam* getModelStackWithParamForClip(ModelStackWithTimelineCounter* modelStackWithTimelineCounter,
 	                                                       Clip* clip, int32_t soundParamId, int32_t globalParamId,
-	                                                       bool forceKitAffectEntire = false);
+	                                                       bool forceKitAffectEntire = false,
+	                                                       Drum* targetKitRowDrum = nullptr);
 	ModelStackWithAutoParam*
 	getModelStackWithParamForSynthClip(ModelStackWithTimelineCounter* modelStackWithTimelineCounter, Clip* clip,
 	                                   int32_t soundParamId, int32_t globalParamId);
 	ModelStackWithAutoParam*
 	getModelStackWithParamForKitClip(ModelStackWithTimelineCounter* modelStackWithTimelineCounter, Clip* clip,
-	                                 int32_t soundParamId, int32_t globalParamId, bool forceKitAffectEntire = false);
+	                                 int32_t soundParamId, int32_t globalParamId, bool forceKitAffectEntire = false,
+	                                 Drum* targetKitRowDrum = nullptr);
 	ModelStackWithAutoParam*
 	getModelStackWithParamForAudioClip(ModelStackWithTimelineCounter* modelStackWithTimelineCounter, Clip* clip,
 	                                   int32_t soundParamId, int32_t globalParamId);
@@ -140,6 +170,7 @@ private:
 
 	MIDIMatchType checkMidiFollowMatch(MIDICable& cable, uint8_t channel);
 	MIDIMatchType checkMidiFollowMatchForSpecificTrack(MIDICable& cable, uint8_t channel, int32_t specific_track_index);
+	MIDIMatchType checkMidiFollowMatchForKitRow(MIDICable& cable, uint8_t channel, int32_t kit_row_index);
 	bool isFeedbackEnabled();
 
 	// saving

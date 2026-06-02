@@ -160,6 +160,12 @@ public:
 	                                                         int32_t paramID,
 	                                                         deluge::modulation::params::Kind paramKind,
 	                                                         bool useMenuStack);
+	// Like getModelStackWithParamForKitRow but scoped to an explicit drum (not the kit's selectedDrum), for
+	// deterministic per-row midi-follow control.
+	ModelStackWithAutoParam* getModelStackWithParamForDrum(ModelStackWithTimelineCounter* modelStack, Clip* clip,
+	                                                       Drum* drum, int32_t paramID,
+	                                                       deluge::modulation::params::Kind paramKind,
+	                                                       bool useMenuStack);
 
 	Drum* getDrumFromNoteCode(InstrumentClip* clip, int32_t noteCode);
 

@@ -1040,6 +1040,38 @@ midi::FollowChannel midiFollowChannelTrack15Menu{STRING_FOR_FOLLOW_CHANNEL_TRACK
                                                  MIDIFollowChannelType::Track15};
 midi::FollowChannel midiFollowChannelTrack16Menu{STRING_FOR_FOLLOW_CHANNEL_TRACK16, STRING_FOR_FOLLOW_CHANNEL_TRACK16,
                                                  MIDIFollowChannelType::Track16};
+midi::FollowChannel midiFollowChannelKitRow1Menu{STRING_FOR_FOLLOW_CHANNEL_KIT_ROW1, STRING_FOR_FOLLOW_CHANNEL_KIT_ROW1,
+                                                 MIDIFollowChannelType::KitRow1};
+midi::FollowChannel midiFollowChannelKitRow2Menu{STRING_FOR_FOLLOW_CHANNEL_KIT_ROW2, STRING_FOR_FOLLOW_CHANNEL_KIT_ROW2,
+                                                 MIDIFollowChannelType::KitRow2};
+midi::FollowChannel midiFollowChannelKitRow3Menu{STRING_FOR_FOLLOW_CHANNEL_KIT_ROW3, STRING_FOR_FOLLOW_CHANNEL_KIT_ROW3,
+                                                 MIDIFollowChannelType::KitRow3};
+midi::FollowChannel midiFollowChannelKitRow4Menu{STRING_FOR_FOLLOW_CHANNEL_KIT_ROW4, STRING_FOR_FOLLOW_CHANNEL_KIT_ROW4,
+                                                 MIDIFollowChannelType::KitRow4};
+midi::FollowChannel midiFollowChannelKitRow5Menu{STRING_FOR_FOLLOW_CHANNEL_KIT_ROW5, STRING_FOR_FOLLOW_CHANNEL_KIT_ROW5,
+                                                 MIDIFollowChannelType::KitRow5};
+midi::FollowChannel midiFollowChannelKitRow6Menu{STRING_FOR_FOLLOW_CHANNEL_KIT_ROW6, STRING_FOR_FOLLOW_CHANNEL_KIT_ROW6,
+                                                 MIDIFollowChannelType::KitRow6};
+midi::FollowChannel midiFollowChannelKitRow7Menu{STRING_FOR_FOLLOW_CHANNEL_KIT_ROW7, STRING_FOR_FOLLOW_CHANNEL_KIT_ROW7,
+                                                 MIDIFollowChannelType::KitRow7};
+midi::FollowChannel midiFollowChannelKitRow8Menu{STRING_FOR_FOLLOW_CHANNEL_KIT_ROW8, STRING_FOR_FOLLOW_CHANNEL_KIT_ROW8,
+                                                 MIDIFollowChannelType::KitRow8};
+midi::FollowChannel midiFollowChannelKitRow9Menu{STRING_FOR_FOLLOW_CHANNEL_KIT_ROW9, STRING_FOR_FOLLOW_CHANNEL_KIT_ROW9,
+                                                 MIDIFollowChannelType::KitRow9};
+midi::FollowChannel midiFollowChannelKitRow10Menu{STRING_FOR_FOLLOW_CHANNEL_KIT_ROW10,
+                                                  STRING_FOR_FOLLOW_CHANNEL_KIT_ROW10, MIDIFollowChannelType::KitRow10};
+midi::FollowChannel midiFollowChannelKitRow11Menu{STRING_FOR_FOLLOW_CHANNEL_KIT_ROW11,
+                                                  STRING_FOR_FOLLOW_CHANNEL_KIT_ROW11, MIDIFollowChannelType::KitRow11};
+midi::FollowChannel midiFollowChannelKitRow12Menu{STRING_FOR_FOLLOW_CHANNEL_KIT_ROW12,
+                                                  STRING_FOR_FOLLOW_CHANNEL_KIT_ROW12, MIDIFollowChannelType::KitRow12};
+midi::FollowChannel midiFollowChannelKitRow13Menu{STRING_FOR_FOLLOW_CHANNEL_KIT_ROW13,
+                                                  STRING_FOR_FOLLOW_CHANNEL_KIT_ROW13, MIDIFollowChannelType::KitRow13};
+midi::FollowChannel midiFollowChannelKitRow14Menu{STRING_FOR_FOLLOW_CHANNEL_KIT_ROW14,
+                                                  STRING_FOR_FOLLOW_CHANNEL_KIT_ROW14, MIDIFollowChannelType::KitRow14};
+midi::FollowChannel midiFollowChannelKitRow15Menu{STRING_FOR_FOLLOW_CHANNEL_KIT_ROW15,
+                                                  STRING_FOR_FOLLOW_CHANNEL_KIT_ROW15, MIDIFollowChannelType::KitRow15};
+midi::FollowChannel midiFollowChannelKitRow16Menu{STRING_FOR_FOLLOW_CHANNEL_KIT_ROW16,
+                                                  STRING_FOR_FOLLOW_CHANNEL_KIT_ROW16, MIDIFollowChannelType::KitRow16};
 midi::FollowKitRootNote midiFollowKitRootNoteMenu{STRING_FOR_FOLLOW_KIT_ROOT_NOTE};
 ToggleBool midiFollowDisplayParamMenu{STRING_FOR_FOLLOW_DISPLAY_PARAM, STRING_FOR_FOLLOW_DISPLAY_PARAM,
                                       midiEngine.midiFollowDisplayParam};
@@ -1052,13 +1084,18 @@ Submenu midiFollowChannelSubmenu{
     STRING_FOR_CHANNEL,
     STRING_FOR_CHANNEL,
     {
-        &midiFollowChannelAMenu,       &midiFollowChannelBMenu,       &midiFollowChannelCMenu,
-        &midiFollowChannelTrack1Menu,  &midiFollowChannelTrack2Menu,  &midiFollowChannelTrack3Menu,
-        &midiFollowChannelTrack4Menu,  &midiFollowChannelTrack5Menu,  &midiFollowChannelTrack6Menu,
-        &midiFollowChannelTrack7Menu,  &midiFollowChannelTrack8Menu,  &midiFollowChannelTrack9Menu,
-        &midiFollowChannelTrack10Menu, &midiFollowChannelTrack11Menu, &midiFollowChannelTrack12Menu,
-        &midiFollowChannelTrack13Menu, &midiFollowChannelTrack14Menu, &midiFollowChannelTrack15Menu,
-        &midiFollowChannelTrack16Menu,
+        &midiFollowChannelAMenu,        &midiFollowChannelBMenu,        &midiFollowChannelCMenu,
+        &midiFollowChannelTrack1Menu,   &midiFollowChannelTrack2Menu,   &midiFollowChannelTrack3Menu,
+        &midiFollowChannelTrack4Menu,   &midiFollowChannelTrack5Menu,   &midiFollowChannelTrack6Menu,
+        &midiFollowChannelTrack7Menu,   &midiFollowChannelTrack8Menu,   &midiFollowChannelTrack9Menu,
+        &midiFollowChannelTrack10Menu,  &midiFollowChannelTrack11Menu,  &midiFollowChannelTrack12Menu,
+        &midiFollowChannelTrack13Menu,  &midiFollowChannelTrack14Menu,  &midiFollowChannelTrack15Menu,
+        &midiFollowChannelTrack16Menu,  &midiFollowChannelKitRow1Menu,  &midiFollowChannelKitRow2Menu,
+        &midiFollowChannelKitRow3Menu,  &midiFollowChannelKitRow4Menu,  &midiFollowChannelKitRow5Menu,
+        &midiFollowChannelKitRow6Menu,  &midiFollowChannelKitRow7Menu,  &midiFollowChannelKitRow8Menu,
+        &midiFollowChannelKitRow9Menu,  &midiFollowChannelKitRow10Menu, &midiFollowChannelKitRow11Menu,
+        &midiFollowChannelKitRow12Menu, &midiFollowChannelKitRow13Menu, &midiFollowChannelKitRow14Menu,
+        &midiFollowChannelKitRow15Menu, &midiFollowChannelKitRow16Menu,
     },
 };
 

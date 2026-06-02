@@ -232,14 +232,17 @@ enum Entries {
 // MIDI-follow Track 1-16 flash layout:
 constexpr size_t kMidiFollowTrackChannelByte = 190; // 16 channelOrZone bytes: 190-205
 constexpr size_t kMidiFollowTrackDeviceByte = 206;  // 16 x 4-byte device references: 206-269
+// MIDI-follow KitRow 1-16 flash layout (appended after the Track block which ends at buffer[269]):
+constexpr size_t kMidiFollowKitRowChannelByte = 270; // 16 channelOrZone bytes: 270-285
+constexpr size_t kMidiFollowKitRowDeviceByte = 286;  // 16 x 4-byte device references: 286-349
 
-// Track follow channels live in flash bytes that older firmware never wrote meaningfully, so their "blank"
-// value can be either 0x00 (zero-filled by a full-buffer write) or 0xFF (erased flash), depending on the
-// upgrade path. We therefore store channelOrZone as (channel + 1) -- matching the global MIDI command
-// convention -- so 0x00 reads back as MIDI_CHANNEL_NONE, and we also treat 0xFF as none. This avoids the
-// "everything spuriously learned to channel 1" trap. (Follow channels A/B/C predate this and are stored
-// directly; they live in the always-written region so they never see a blank byte, and changing their
-// encoding would misread existing users' learned channels -- so they are intentionally left as-is.)
+// Track and KitRow follow channels live in flash bytes that older firmware never wrote meaningfully, so
+// their "blank" value can be either 0x00 (zero-filled by a full-buffer write) or 0xFF (erased flash),
+// depending on the upgrade path. We therefore store channelOrZone as (channel + 1) -- matching the global
+// MIDI command convention -- so 0x00 reads back as MIDI_CHANNEL_NONE, and we also treat 0xFF as none. This
+// avoids the "everything spuriously learned to channel 1" trap. (Follow channels A/B/C predate this and are
+// stored directly; they live in the always-written region so they never see a blank byte, and changing
+// their encoding would misread existing users' learned channels -- so they are intentionally left as-is.)
 constexpr uint8_t encodeFollowChannel(uint8_t channelOrZone) {
 	return (channelOrZone == MIDI_CHANNEL_NONE) ? 0 : static_cast<uint8_t>(channelOrZone + 1);
 }
@@ -248,14 +251,16 @@ constexpr uint8_t decodeFollowChannel(uint8_t raw) {
 }
 
 // Size of the settings blob: highest byte index written by writeSettings/writeMidiFollowSettings + 1.
-// The MIDI-follow track mappings extend the layout out to buffer[269] (Track16 device ref), so 269 + 1.
+// The KitRow device references end the layout at buffer[349] (286 + 16*4 - 1), so 349 + 1.
 // Keep this in sync when adding settings -- if the blob outgrows the flash settings buffer the build
 // fails here instead of silently truncating on the device. (A documented tripwire, not per-write bounds
 // checking.)
-constexpr size_t kSettingsBytesUsed = 270;
+constexpr size_t kSettingsBytesUsed = 350;
 static_assert(kSettingsBytesUsed <= kFlashSettingsBufferSize,
               "settings layout has outgrown kFlashSettingsBufferSize -- raise the buffer (it must stay "
               "within kFlashSettingsRegionSize)");
+static_assert(kMidiFollowKitRowDeviceByte + kNumMidiFollowKitRowTypes * 4 == kSettingsBytesUsed,
+              "kSettingsBytesUsed must match the end of the KitRow device-reference block");
 
 uint8_t defaultScale;
 bool audioClipRecordMargins;
@@ -895,10 +900,18 @@ static bool areMidiFollowSettingsValid(std::span<uint8_t> buffer) {
 	else if (buffer[133] != 0 && buffer[133] != 1) {
 		return false;
 	}
-	// Track 1-16 channelOrZone bytes use the +1 follow-channel encoding, so both the zero-filled (0x00) and
-	// erased (0xFF) blank values decode to MIDI_CHANNEL_NONE and validate as "unlearned" rather than channel 1.
+	// Track 1-16 and KitRow 1-16 channelOrZone bytes use the +1 follow-channel encoding, so both the
+	// zero-filled (0x00) and erased (0xFF) blank values decode to MIDI_CHANNEL_NONE and validate as
+	// "unlearned" rather than as channel 1.
 	for (size_t byte = kMidiFollowTrackChannelByte;
 	     byte < kMidiFollowTrackChannelByte + kNumMIDIFollowChannelTrackTypes; ++byte) {
+		uint8_t channelOrZone = decodeFollowChannel(buffer[byte]);
+		if (channelOrZone >= NUM_CHANNELS && channelOrZone != MIDI_CHANNEL_NONE) {
+			return false;
+		}
+	}
+	for (size_t byte = kMidiFollowKitRowChannelByte; byte < kMidiFollowKitRowChannelByte + kNumMidiFollowKitRowTypes;
+	     ++byte) {
 		uint8_t channelOrZone = decodeFollowChannel(buffer[byte]);
 		if (channelOrZone >= NUM_CHANNELS && channelOrZone != MIDI_CHANNEL_NONE) {
 			return false;
@@ -1001,6 +1014,14 @@ static void readMidiFollowSettings(std::span<uint8_t> buffer) {
 	/* buffer[267]  \
 	buffer[268]   device reference above occupies 4 bytes
 	buffer[269] */
+
+	// KitRow 1-16 follow channels: channelOrZone bytes at 270-285, 4-byte device references at 286-349.
+	for (int32_t i = 0; i < kNumMidiFollowKitRowTypes; ++i) {
+		auto type = static_cast<MIDIFollowChannelType>(kMidiFollowFirstKitRowType + i);
+		midiEngine.midiFollowChannelType[util::to_underlying(type)].channelOrZone =
+		    decodeFollowChannel(buffer[kMidiFollowKitRowChannelByte + i]);
+		MIDIDeviceManager::readMidiFollowDeviceReferenceFromFlash(type, &buffer[kMidiFollowKitRowDeviceByte + i * 4]);
+	}
 }
 
 static bool areAutomationSettingsValid(std::span<uint8_t> buffer) {
@@ -1341,6 +1362,14 @@ static void writeMidiFollowSettings(std::span<uint8_t> buffer) {
 	/* buffer[267]  \
 	buffer[268]   device reference above occupies 4 bytes
 	buffer[269] */
+
+	// KitRow 1-16 follow channels: channelOrZone bytes at 270-285, 4-byte device references at 286-349.
+	for (int32_t i = 0; i < kNumMidiFollowKitRowTypes; ++i) {
+		auto type = static_cast<MIDIFollowChannelType>(kMidiFollowFirstKitRowType + i);
+		buffer[kMidiFollowKitRowChannelByte + i] =
+		    encodeFollowChannel(midiEngine.midiFollowChannelType[util::to_underlying(type)].channelOrZone);
+		MIDIDeviceManager::writeMidiFollowDeviceReferenceToFlash(type, &buffer[kMidiFollowKitRowDeviceByte + i * 4]);
+	}
 }
 
 } // namespace FlashStorage

@@ -650,12 +650,37 @@ enum class MIDIFollowChannelType : uint8_t {
 	Track14,
 	Track15,
 	Track16,
+	KitRow1,
+	KitRow2,
+	KitRow3,
+	KitRow4,
+	KitRow5,
+	KitRow6,
+	KitRow7,
+	KitRow8,
+	KitRow9,
+	KitRow10,
+	KitRow11,
+	KitRow12,
+	KitRow13,
+	KitRow14,
+	KitRow15,
+	KitRow16,
 	LAST, // Keep as boundary
 };
-constexpr auto kNumMIDIFollowChannelTypes = util::to_underlying(MIDIFollowChannelType::Track1);              // 5
-constexpr auto kNumMIDIFollowChannelTypesIncludingTracks = util::to_underlying(MIDIFollowChannelType::LAST); // 21
+constexpr auto kNumMIDIFollowChannelTypes =
+    util::to_underlying(MIDIFollowChannelType::Track1); // 5 (A, B, C, Track, NONE)
+// Upper bound of the Track block; also the index of the first kit-row type. Used to bound track matching
+// and feedback so kit rows are excluded from both.
+constexpr auto kNumMIDIFollowChannelTypesIncludingTracks = util::to_underlying(MIDIFollowChannelType::KitRow1); // 21
 constexpr int32_t kNumMIDIFollowChannelTrackTypes =
     kNumMIDIFollowChannelTypesIncludingTracks - kNumMIDIFollowChannelTypes; // 21 - 5 = 16
+// Full size of the learned-MIDI array: includes A/B/C/Track/NONE, Track1-16, and KitRow1-16.
+constexpr auto kNumMIDIFollowChannelTypesIncludingTracksAndRows =
+    util::to_underlying(MIDIFollowChannelType::LAST);                                            // 37
+constexpr auto kMidiFollowFirstKitRowType = util::to_underlying(MIDIFollowChannelType::KitRow1); // 21
+constexpr int32_t kNumMidiFollowKitRowTypes =
+    kNumMIDIFollowChannelTypesIncludingTracksAndRows - kNumMIDIFollowChannelTypesIncludingTracks; // 37 - 21 = 16
 
 enum class MIDITransposeControlMethod : uint8_t {
 	INKEY,
