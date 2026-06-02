@@ -229,6 +229,24 @@ enum Entries {
 266-269: midiFollow set follow device track 16	product / vendor ids
 */
 
+// MIDI-follow Track 1-16 flash layout:
+constexpr size_t kMidiFollowTrackChannelByte = 190; // 16 channelOrZone bytes: 190-205
+constexpr size_t kMidiFollowTrackDeviceByte = 206;  // 16 x 4-byte device references: 206-269
+
+// Track follow channels live in flash bytes that older firmware never wrote meaningfully, so their "blank"
+// value can be either 0x00 (zero-filled by a full-buffer write) or 0xFF (erased flash), depending on the
+// upgrade path. We therefore store channelOrZone as (channel + 1) -- matching the global MIDI command
+// convention -- so 0x00 reads back as MIDI_CHANNEL_NONE, and we also treat 0xFF as none. This avoids the
+// "everything spuriously learned to channel 1" trap. (Follow channels A/B/C predate this and are stored
+// directly; they live in the always-written region so they never see a blank byte, and changing their
+// encoding would misread existing users' learned channels -- so they are intentionally left as-is.)
+constexpr uint8_t encodeFollowChannel(uint8_t channelOrZone) {
+	return (channelOrZone == MIDI_CHANNEL_NONE) ? 0 : static_cast<uint8_t>(channelOrZone + 1);
+}
+constexpr uint8_t decodeFollowChannel(uint8_t raw) {
+	return (raw == 0x00 || raw == 0xFF) ? static_cast<uint8_t>(MIDI_CHANNEL_NONE) : static_cast<uint8_t>(raw - 1);
+}
+
 // Size of the settings blob: highest byte index written by writeSettings/writeMidiFollowSettings + 1.
 // The MIDI-follow track mappings extend the layout out to buffer[269] (Track16 device ref), so 269 + 1.
 // Keep this in sync when adding settings -- if the blob outgrows the flash settings buffer the build
@@ -877,69 +895,14 @@ static bool areMidiFollowSettingsValid(std::span<uint8_t> buffer) {
 	else if (buffer[133] != 0 && buffer[133] != 1) {
 		return false;
 	}
-	// midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track1)].channelOrZone
-	if ((buffer[190] < 0 || buffer[190] >= NUM_CHANNELS) && buffer[190] != MIDI_CHANNEL_NONE) {
-		return false;
-	}
-	// midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track2)].channelOrZone
-	if ((buffer[191] < 0 || buffer[191] >= NUM_CHANNELS) && buffer[191] != MIDI_CHANNEL_NONE) {
-		return false;
-	}
-	// midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track3)].channelOrZone
-	if ((buffer[192] < 0 || buffer[192] >= NUM_CHANNELS) && buffer[192] != MIDI_CHANNEL_NONE) {
-		return false;
-	}
-	// midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track4)].channelOrZone
-	if ((buffer[193] < 0 || buffer[193] >= NUM_CHANNELS) && buffer[193] != MIDI_CHANNEL_NONE) {
-		return false;
-	}
-	// midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track5)].channelOrZone
-	if ((buffer[194] < 0 || buffer[194] >= NUM_CHANNELS) && buffer[194] != MIDI_CHANNEL_NONE) {
-		return false;
-	}
-	// midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track6)].channelOrZone
-	if ((buffer[195] < 0 || buffer[195] >= NUM_CHANNELS) && buffer[195] != MIDI_CHANNEL_NONE) {
-		return false;
-	}
-	// midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track7)].channelOrZone
-	if ((buffer[196] < 0 || buffer[196] >= NUM_CHANNELS) && buffer[196] != MIDI_CHANNEL_NONE) {
-		return false;
-	}
-	// midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track8)].channelOrZone
-	if ((buffer[197] < 0 || buffer[197] >= NUM_CHANNELS) && buffer[197] != MIDI_CHANNEL_NONE) {
-		return false;
-	}
-	// midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track9)].channelOrZone
-	if ((buffer[198] < 0 || buffer[198] >= NUM_CHANNELS) && buffer[198] != MIDI_CHANNEL_NONE) {
-		return false;
-	}
-	// midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track10)].channelOrZone
-	if ((buffer[199] < 0 || buffer[199] >= NUM_CHANNELS) && buffer[199] != MIDI_CHANNEL_NONE) {
-		return false;
-	}
-	// midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track11)].channelOrZone
-	if ((buffer[200] < 0 || buffer[200] >= NUM_CHANNELS) && buffer[200] != MIDI_CHANNEL_NONE) {
-		return false;
-	}
-	// midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track12)].channelOrZone
-	if ((buffer[201] < 0 || buffer[201] >= NUM_CHANNELS) && buffer[201] != MIDI_CHANNEL_NONE) {
-		return false;
-	}
-	// midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track13)].channelOrZone
-	if ((buffer[202] < 0 || buffer[202] >= NUM_CHANNELS) && buffer[202] != MIDI_CHANNEL_NONE) {
-		return false;
-	}
-	// midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track14)].channelOrZone
-	if ((buffer[203] < 0 || buffer[203] >= NUM_CHANNELS) && buffer[203] != MIDI_CHANNEL_NONE) {
-		return false;
-	}
-	// midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track15)].channelOrZone
-	if ((buffer[204] < 0 || buffer[204] >= NUM_CHANNELS) && buffer[204] != MIDI_CHANNEL_NONE) {
-		return false;
-	}
-	// midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track16)].channelOrZone
-	if ((buffer[205] < 0 || buffer[205] >= NUM_CHANNELS) && buffer[205] != MIDI_CHANNEL_NONE) {
-		return false;
+	// Track 1-16 channelOrZone bytes use the +1 follow-channel encoding, so both the zero-filled (0x00) and
+	// erased (0xFF) blank values decode to MIDI_CHANNEL_NONE and validate as "unlearned" rather than channel 1.
+	for (size_t byte = kMidiFollowTrackChannelByte;
+	     byte < kMidiFollowTrackChannelByte + kNumMIDIFollowChannelTrackTypes; ++byte) {
+		uint8_t channelOrZone = decodeFollowChannel(buffer[byte]);
+		if (channelOrZone >= NUM_CHANNELS && channelOrZone != MIDI_CHANNEL_NONE) {
+			return false;
+		}
 	}
 	// place holder for checking if midi follow devices are valid
 	return true;
@@ -967,23 +930,13 @@ static void readMidiFollowSettings(std::span<uint8_t> buffer) {
 	midiEngine.midiFollowFeedbackAutomation = static_cast<MIDIFollowFeedbackAutomationMode>(buffer[132]);
 	midiEngine.midiFollowFeedbackFilter = !!buffer[133];
 
-	// New Track 1-16 Midi Follow Channels
-	midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track1)].channelOrZone = buffer[190];
-	midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track2)].channelOrZone = buffer[191];
-	midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track3)].channelOrZone = buffer[192];
-	midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track4)].channelOrZone = buffer[193];
-	midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track5)].channelOrZone = buffer[194];
-	midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track6)].channelOrZone = buffer[195];
-	midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track7)].channelOrZone = buffer[196];
-	midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track8)].channelOrZone = buffer[197];
-	midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track9)].channelOrZone = buffer[198];
-	midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track10)].channelOrZone = buffer[199];
-	midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track11)].channelOrZone = buffer[200];
-	midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track12)].channelOrZone = buffer[201];
-	midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track13)].channelOrZone = buffer[202];
-	midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track14)].channelOrZone = buffer[203];
-	midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track15)].channelOrZone = buffer[204];
-	midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track16)].channelOrZone = buffer[205];
+	// New Track 1-16 Midi Follow Channels. channelOrZone uses the +1 follow-channel encoding (see
+	// encode/decodeFollowChannel); the device references below are unchanged.
+	for (int32_t i = 0; i < kNumMIDIFollowChannelTrackTypes; ++i) {
+		auto type = static_cast<MIDIFollowChannelType>(kNumMIDIFollowChannelTypes + i);
+		midiEngine.midiFollowChannelType[util::to_underlying(type)].channelOrZone =
+		    decodeFollowChannel(buffer[kMidiFollowTrackChannelByte + i]);
+	}
 	MIDIDeviceManager::readMidiFollowDeviceReferenceFromFlash(MIDIFollowChannelType::Track1, &buffer[206]);
 	/* buffer[207]  \
 	buffer[208]   device reference above occupies 4 bytes
@@ -1317,23 +1270,13 @@ static void writeMidiFollowSettings(std::span<uint8_t> buffer) {
 	   buffer[144]   device reference above occupies 4 bytes
 	   buffer[145] */
 
-	// New Track 1-16 Midi Follow Channels
-	buffer[190] = midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track1)].channelOrZone;
-	buffer[191] = midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track2)].channelOrZone;
-	buffer[192] = midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track3)].channelOrZone;
-	buffer[193] = midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track4)].channelOrZone;
-	buffer[194] = midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track5)].channelOrZone;
-	buffer[195] = midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track6)].channelOrZone;
-	buffer[196] = midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track7)].channelOrZone;
-	buffer[197] = midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track8)].channelOrZone;
-	buffer[198] = midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track9)].channelOrZone;
-	buffer[199] = midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track10)].channelOrZone;
-	buffer[200] = midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track11)].channelOrZone;
-	buffer[201] = midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track12)].channelOrZone;
-	buffer[202] = midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track13)].channelOrZone;
-	buffer[203] = midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track14)].channelOrZone;
-	buffer[204] = midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track15)].channelOrZone;
-	buffer[205] = midiEngine.midiFollowChannelType[util::to_underlying(MIDIFollowChannelType::Track16)].channelOrZone;
+	// New Track 1-16 Midi Follow Channels. channelOrZone uses the +1 follow-channel encoding (see
+	// encode/decodeFollowChannel); the device references below are unchanged.
+	for (int32_t i = 0; i < kNumMIDIFollowChannelTrackTypes; ++i) {
+		auto type = static_cast<MIDIFollowChannelType>(kNumMIDIFollowChannelTypes + i);
+		buffer[kMidiFollowTrackChannelByte + i] =
+		    encodeFollowChannel(midiEngine.midiFollowChannelType[util::to_underlying(type)].channelOrZone);
+	}
 	MIDIDeviceManager::writeMidiFollowDeviceReferenceToFlash(MIDIFollowChannelType::Track1, &buffer[206]);
 	/* buffer[207]  \
 	buffer[208]   device reference above occupies 4 bytes
