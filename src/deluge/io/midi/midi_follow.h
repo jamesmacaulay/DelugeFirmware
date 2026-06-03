@@ -62,6 +62,9 @@ public:
 	int32_t getCCFromParam(deluge::modulation::params::Kind paramKind, int32_t paramID);
 	bool isGlobalEffectableContext();
 
+	// Value stored in ccToSoundParam / ccToGlobalParam when a CC maps to no param.
+	static constexpr uint8_t kNoParamMapping = 255;
+
 	std::array<uint8_t, kMaxMIDIValue + 1> ccToSoundParam;
 	std::array<uint8_t, kMaxMIDIValue + 1> ccToGlobalParam;
 	std::array<uint8_t, params::UNPATCHED_START + params::UNPATCHED_SOUND_MAX_NUM> soundParamToCC;
@@ -76,6 +79,18 @@ public:
 	void sendCCForMidiFollowFeedback(int32_t channel, int32_t ccNumber, int32_t knobPos);
 
 	void handleReceivedCC(ModelStackWithTimelineCounter& modelStack, Clip* clip, int32_t ccNumber, int32_t ccValue);
+
+	// The two halves of handleReceivedCC, exposed so the per-instrument "Default CC Input" feature can
+	// resolve the target param itself (instrument's own clip / a specific kit-global or drum param) while
+	// reusing the exact same step-edit region handling, arrangement-record cloning, and MIDI takeover.
+	/// Computes the step-edit region and clones for arrangement recording. May change the model stack's
+	/// timeline counter, so resolve the target param AFTER calling this.
+	void prepareCCRegionForParamChange(ModelStackWithTimelineCounter& modelStack, int32_t& modPos, int32_t& modLength,
+	                                   bool& isStepEditing);
+	/// Applies an incoming CC value to an already-resolved auto param, with MIDI takeover and
+	/// automation/performance-view refresh.
+	void setParamFromCC(ModelStackWithAutoParam* modelStackWithParam, Clip* clip, int32_t ccNumber, int32_t ccValue,
+	                    int32_t modPos, int32_t modLength, bool isStepEditing);
 
 private:
 	// initialize

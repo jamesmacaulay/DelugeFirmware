@@ -55,7 +55,7 @@ using namespace gui;
 #define MIDI_DEFAULTS_TAG "defaults"
 #define MIDI_DEFAULTS_CC_TAG "defaultCCMappings"
 
-constexpr int32_t PARAM_ID_NONE = 255;
+constexpr int32_t PARAM_ID_NONE = MidiFollow::kNoParamMapping;
 
 PLACE_SDRAM_BSS MidiFollow midiFollow{};
 
@@ -763,12 +763,11 @@ void MidiFollow::midiCCReceived(MIDICable& cable, uint8_t channel, uint8_t ccNum
 /// if the cc has been learned, it sets the new value for that parameter
 /// this function works by first checking the active context to see if there is an active clip
 /// to determine if the cc intends to control a song level or clip level parameter
-void MidiFollow::handleReceivedCC(ModelStackWithTimelineCounter& modelStackWithTimelineCounter, Clip* clip,
-                                  int32_t ccNumber, int32_t ccValue) {
-
-	int32_t modPos = 0;
-	int32_t modLength = 0;
-	bool isStepEditing = false;
+void MidiFollow::prepareCCRegionForParamChange(ModelStackWithTimelineCounter& modelStackWithTimelineCounter,
+                                               int32_t& modPos, int32_t& modLength, bool& isStepEditing) {
+	modPos = 0;
+	modLength = 0;
+	isStepEditing = false;
 
 	if (modelStackWithTimelineCounter.timelineCounterIsSet()) {
 		TimelineCounter* timelineCounter = modelStackWithTimelineCounter.getTimelineCounter();
@@ -783,6 +782,15 @@ void MidiFollow::handleReceivedCC(ModelStackWithTimelineCounter& modelStackWithT
 
 		timelineCounter->possiblyCloneForArrangementRecording(&modelStackWithTimelineCounter);
 	}
+}
+
+void MidiFollow::handleReceivedCC(ModelStackWithTimelineCounter& modelStackWithTimelineCounter, Clip* clip,
+                                  int32_t ccNumber, int32_t ccValue) {
+
+	int32_t modPos = 0;
+	int32_t modLength = 0;
+	bool isStepEditing = false;
+	prepareCCRegionForParamChange(modelStackWithTimelineCounter, modPos, modLength, isStepEditing);
 
 	// directly access the parameter from the CC number
 	uint8_t soundParamId = ccToSoundParam[ccNumber];
@@ -794,6 +802,12 @@ void MidiFollow::handleReceivedCC(ModelStackWithTimelineCounter& modelStackWithT
 
 	ModelStackWithAutoParam* modelStackWithParam = getModelStackWithParam(
 	    &modelStackWithTimelineCounter, clip, soundParamId, globalParamId, midiEngine.midiFollowDisplayParam);
+
+	setParamFromCC(modelStackWithParam, clip, ccNumber, ccValue, modPos, modLength, isStepEditing);
+}
+
+void MidiFollow::setParamFromCC(ModelStackWithAutoParam* modelStackWithParam, Clip* clip, int32_t ccNumber,
+                                int32_t ccValue, int32_t modPos, int32_t modLength, bool isStepEditing) {
 	// check if model stack is valid
 	if (modelStackWithParam && modelStackWithParam->autoParam) {
 		int32_t currentValue;
