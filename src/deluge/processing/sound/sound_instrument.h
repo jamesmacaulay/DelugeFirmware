@@ -48,6 +48,8 @@ public:
 	                                           ModelStackWithTimelineCounter* modelStack) override {
 		return Sound::offerReceivedPitchBendToLearnedParams(cable, channel, data1, data2, modelStack);
 	}
+	void offerReceivedCCToDefaultMap(MIDICable& cable, uint8_t channel, uint8_t ccNumber, uint8_t value,
+	                                 ModelStackWithTimelineCounter* modelStack) override;
 
 	Error loadAllAudioFiles(bool mayActuallyReadFiles) override;
 	void resyncLFOs() override;

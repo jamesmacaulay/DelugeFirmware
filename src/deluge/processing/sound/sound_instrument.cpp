@@ -19,6 +19,7 @@
 #include "definitions_cxx.hpp"
 #include "dsp/stereo_sample.h"
 #include "gui/views/view.h"
+#include "io/midi/midi_follow.h"
 #include "model/clip/instrument_clip.h"
 #include "model/model_stack.h"
 #include "model/note/note_row.h"
@@ -72,6 +73,25 @@ bool SoundInstrument::writeDataToFile(Serializer& writer, Clip* clipForSavingOut
 	MelodicInstrument::writeMelodicInstrumentTagsToFile(writer, clipForSavingOutputOnly, song);
 
 	return true;
+}
+
+void SoundInstrument::offerReceivedCCToDefaultMap(MIDICable& cable, uint8_t channel, uint8_t ccNumber, uint8_t value,
+                                                  ModelStackWithTimelineCounter* modelStack) {
+	// Only act if this instrument has a Default CC Input bound and the message matches its device+channel.
+	if (defaultCCMidiInput.checkMatch(&cable, channel) == MIDIMatchType::NO_MATCH) {
+		return;
+	}
+	// Explicitly-learned knobs take precedence: if this exact CC is already learned to a param here, let
+	// that binding own it rather than also applying the default mapping.
+	if (hasLearnedKnobForCC(cable, channel, ccNumber)) {
+		return;
+	}
+	// Reuse MIDI-follow's default-map resolution + MIDI takeover + automation recording, but targeting
+	// THIS instrument's own clip rather than the selected/active one.
+	if (!modelStack->timelineCounterIsSet()) {
+		return;
+	}
+	midiFollow.handleReceivedCC(*modelStack, (Clip*)modelStack->getTimelineCounter(), ccNumber, value);
 }
 
 // arpSettings optional - no need if you're loading a new V2.0 song where Instruments are all separate from Clips and

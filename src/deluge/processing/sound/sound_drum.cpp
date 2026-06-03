@@ -20,16 +20,71 @@
 #include "gui/views/automation_view.h"
 #include "gui/views/instrument_clip_view.h"
 #include "gui/views/view.h"
+#include "io/midi/midi_follow.h"
 #include "mem_functions.h"
 #include "model/action/action_logger.h"
 #include "model/clip/clip.h"
 #include "model/instrument/kit.h"
+#include "model/model_stack.h"
 #include "model/song/song.h"
 #include "model/voice/voice.h"
 #include "processing/engines/audio_engine.h"
 #include "storage/storage_manager.h"
 #include "util/misc.h"
 #include <new>
+
+namespace params = deluge::modulation::params;
+
+void SoundDrum::offerReceivedCCToDefaultMap(MIDICable& cable, uint8_t channel, uint8_t ccNumber, uint8_t value,
+                                            ModelStackWithTimelineCounter* modelStack, int32_t noteRowIndex) {
+	if (defaultCCMidiInput.checkMatch(&cable, channel) == MIDIMatchType::NO_MATCH) {
+		return;
+	}
+	// Explicitly-learned knobs take precedence for this exact CC.
+	if (hasLearnedKnobForCC(cable, channel, ccNumber)) {
+		return;
+	}
+
+	// Resolve the CC to a drum (sound) param via MIDI-follow's default map. Mirrors the no-affect-entire
+	// branch of MidiFollow::getModelStackWithParamForKitClip, including the Portamento exclusion.
+	uint8_t soundParamId = midiFollow.ccToSoundParam[ccNumber];
+	if (soundParamId == MidiFollow::kNoParamMapping) {
+		return;
+	}
+	params::Kind paramKind = params::Kind::NONE;
+	int32_t paramID = MidiFollow::kNoParamMapping;
+	if (soundParamId < params::UNPATCHED_START) {
+		paramKind = params::Kind::PATCHED;
+		paramID = soundParamId;
+	}
+	else if (soundParamId - params::UNPATCHED_START != params::UNPATCHED_PORTAMENTO) {
+		paramKind = params::Kind::UNPATCHED_SOUND;
+		paramID = soundParamId - params::UNPATCHED_START;
+	}
+	if (paramKind == params::Kind::NONE) {
+		return;
+	}
+
+	int32_t modPos = 0;
+	int32_t modLength = 0;
+	bool isStepEditing = false;
+	midiFollow.prepareCCRegionForParamChange(*modelStack, modPos, modLength, isStepEditing);
+
+	// Build this drum's note-row param stack the same way learned-knob CCs do, then resolve the param.
+	ModelStackWithThreeMainThings* modelStackWithThreeMainThings = addNoteRowIndexAndStuff(modelStack, noteRowIndex);
+	ModelStackWithAutoParam* modelStackWithParam = nullptr;
+	if (modelStackWithThreeMainThings) {
+		if (paramKind == params::Kind::PATCHED) {
+			modelStackWithParam = modelStackWithThreeMainThings->getPatchedAutoParamFromId(paramID);
+		}
+		else {
+			modelStackWithParam = modelStackWithThreeMainThings->getUnpatchedAutoParamFromId(paramID);
+		}
+	}
+
+	midiFollow.setParamFromCC(modelStackWithParam, (Clip*)modelStack->getTimelineCounter(), ccNumber, value, modPos,
+	                          modLength, isStepEditing);
+}
 
 bool SoundDrum::readTagFromFile(Deserializer& reader, char const* tagName) {
 	if (!strcmp(tagName, "path")) {

@@ -62,6 +62,12 @@ public:
 	                                              int32_t channelOrNoteNumber,
 	                                              MIDICharacteristic whichCharacteristic) override;
 
+	/// If this drum has a Default CC Input bound and the message matches it, interpret the CC via
+	/// MIDI-follow's default map and apply it to this drum's param at noteRowIndex (deferring to any
+	/// explicitly-learned knob for the same CC). Mirrors offerReceivedCCToLearnedParamsForClip.
+	void offerReceivedCCToDefaultMap(MIDICable& cable, uint8_t channel, uint8_t ccNumber, uint8_t value,
+	                                 ModelStackWithTimelineCounter* modelStack, int32_t noteRowIndex);
+
 	ArpeggiatorBase* getArp() override { return &arpeggiator; }
 	ArpeggiatorSettings* getArpSettings(InstrumentClip* clip = nullptr) override { return &arpSettings; }
 	void resetTimeEnteredState();
