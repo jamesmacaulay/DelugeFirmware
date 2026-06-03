@@ -92,6 +92,7 @@
 #include "gui/menu_item/midi/after_touch_to_mono.h"
 #include "gui/menu_item/midi/bank.h"
 #include "gui/menu_item/midi/command.h"
+#include "gui/menu_item/midi/default_cc_input.h"
 #include "gui/menu_item/midi/default_velocity_to_level.h"
 #include "gui/menu_item/midi/device.h"
 #include "gui/menu_item/midi/device_definition/linked.h"
@@ -621,7 +622,10 @@ HorizontalMenu soundDistortionMenu{
 // Output MIDI for sound drums --------------------------------------------------------------
 midi::sound::OutputMidiChannel outputMidiChannelMenu{STRING_FOR_CHANNEL, STRING_FOR_CHANNEL};
 midi::sound::OutputMidiNoteForDrum outputMidiNoteForDrumMenu{STRING_FOR_NOTE, STRING_FOR_NOTE};
-Submenu outputMidiSubmenu{STRING_FOR_MIDI, {&outputMidiChannelMenu, &outputMidiNoteForDrumMenu}};
+midi::DefaultCCInput defaultCCInputMenu{STRING_FOR_DEFAULT_CC_INPUT, STRING_FOR_DEFAULT_CC_INPUT};
+Submenu outputMidiSubmenu{STRING_FOR_MIDI, {&outputMidiChannelMenu, &outputMidiNoteForDrumMenu, &defaultCCInputMenu}};
+// Kit-global MIDI submenu (KIT GLOBAL FX -> MIDI). defaultCCInputMenu resolves to the Kit's binding here.
+Submenu kitGlobalMidiSubmenu{STRING_FOR_MIDI, {&defaultCCInputMenu}};
 
 // MIDIInstrument menu ----------------------------------------------------------------------
 midi::device_definition::Linked midiDeviceLinkedMenu{STRING_FOR_MIDI_DEVICE_DEFINITION_LINKED,
@@ -1683,6 +1687,7 @@ menu_item::Submenu soundEditorRootMenuKitGlobalFX{
         &globalFiltersMenu,
         &globalFXMenu,
         &globalSidechainMenu,
+        &kitGlobalMidiSubmenu,
     },
 };
 
