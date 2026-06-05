@@ -141,6 +141,10 @@ public:
 	                                       int32_t newKnobPos);
 	void sendMidiFollowFeedback(ModelStackWithAutoParam* modelStackWithParam = nullptr, int32_t knobPos = kNoSelection,
 	                            bool isAutomation = false);
+	// MIDI-learned-knob feedback (MidiInputAutoFeedback, default off): echo the active instrument's learned
+	// knobs out to their controllers — per-edit echo (modelStackWithParam set) and context-sync (null). Fired
+	// from sendMidiFollowFeedback's call sites; skips the per-tick automation mirror (isAutomation).
+	void sendLearnedKnobFeedback(ModelStackWithAutoParam* modelStackWithParam, bool isAutomation);
 
 	// vu meter rendering
 	bool displayVUMeter;

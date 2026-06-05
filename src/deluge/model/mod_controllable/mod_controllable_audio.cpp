@@ -1049,6 +1049,60 @@ ModelStackWithThreeMainThings* ModControllableAudio::addNoteRowIndexAndStuff(Mod
 	return modelStackWithThreeMainThings;
 }
 
+void ModControllableAudio::sendLearnedKnobFeedback(ModelStackWithThreeMainThings* modelStack,
+                                                   ModelStackWithAutoParam* editedParam) {
+	// Per-edit echo (editedParam set) / context-sync (editedParam null). The caller (View) gates on the
+	// MidiInputAutoFeedback flag and clip context. Loop-safety: an echoed value re-enters learned-knob input
+	// as a CC equal to the current value, which the value-equality no-op in setParamFromCC drops (no change
+	// -> no re-echo), so no extra guard is needed here.
+	for (MIDIKnob& knob : midi_knobs) {
+		ModelStackWithAutoParam* knobParam = getParamFromMIDIKnob(knob, modelStack);
+		if (!knobParam || !knobParam->autoParam) {
+			continue;
+		}
+		// Per-edit echo: only the knob bound to the param that just changed. Pointer-equality of the resolved
+		// AutoParam is exact and needs no paramDescriptor math; it also naturally skips edits to params no
+		// learned knob is bound to (e.g. patched params, since learned knobs resolve as unpatched).
+		if (editedParam && knobParam->autoParam != editedParam->autoParam) {
+			continue;
+		}
+		int32_t knobPos =
+		    knobParam->paramCollection->paramValueToKnobPos(knobParam->autoParam->getCurrentValue(), knobParam);
+		sendLearnedKnobFeedbackToController(knob, knobPos);
+	}
+}
+
+void ModControllableAudio::sendLearnedKnobFeedbackToController(MIDIKnob& knob, int32_t knobPos) {
+	// Relative encoders have no absolute position to show or seek.
+	if (knob.relative) {
+		return;
+	}
+	// 14-bit / pitch-bend-learned knobs use noteOrCC == 128 as a sentinel; we can't echo them as a 7-bit CC
+	// (sending noteOrCC would emit a malformed CC number 128). The input path matches these via a separate
+	// pitch-bend handler, never as a CC — mirror that by skipping them here rather than emitting a corrupt
+	// byte. (Pitch-bend-to-param learning is deprecated post-4.0; this just keeps legacy configs safe.)
+	if (knob.is14Bit()) {
+		return;
+	}
+	// Only send device-specifically. A null cable means the knob was learned device-agnostically
+	// (differentiate-inputs-by-device off); skip rather than broadcast to every output (which could fan a
+	// DIN chain out to unrelated gear).
+	MIDICable* cable = knob.midiInput.cable;
+	if (cable == nullptr) {
+		return;
+	}
+	int32_t channel = knob.midiInput.isForMPEZone() ? knob.midiInput.getMasterChannel() : knob.midiInput.channelOrZone;
+
+	// knobPos is [-64, 64]; a CC value is [0, 127], mirroring MidiTakeover's (ccValue - 64) input mapping.
+	// Clamp the top (knobPos 64 -> 128) ourselves since the direct cable send doesn't clamp like
+	// MidiEngine::sendCC does.
+	int32_t ccValue = knobPos + kKnobPosOffset;
+	if (ccValue > kMaxMIDIValue) {
+		ccValue = kMaxMIDIValue;
+	}
+	cable->sendCC(channel, knob.midiInput.noteOrCC, ccValue);
+}
+
 bool ModControllableAudio::offerReceivedCCToLearnedParamsForClip(MIDICable& cable, uint8_t channel, uint8_t ccNumber,
                                                                  uint8_t value,
                                                                  ModelStackWithTimelineCounter* modelStack,

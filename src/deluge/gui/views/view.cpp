@@ -1680,6 +1680,9 @@ void View::notifyParamAutomationOccurred(ParamManager* paramManager, bool update
 }
 
 void View::sendMidiFollowFeedback(ModelStackWithAutoParam* modelStackWithParam, int32_t knobPos, bool isAutomation) {
+	// Independent of follow's feedback channel: echo learned-knob values to their own controllers.
+	sendLearnedKnobFeedback(modelStackWithParam, isAutomation);
+
 	if (midiEngine.midiFollowFeedbackChannelType != MIDIFollowChannelType::NONE) {
 		int32_t channel =
 		    midiEngine.midiFollowChannelType[util::to_underlying(midiEngine.midiFollowFeedbackChannelType)]
@@ -1700,6 +1703,36 @@ void View::sendMidiFollowFeedback(ModelStackWithAutoParam* modelStackWithParam, 
 			}
 		}
 	}
+}
+
+void View::sendLearnedKnobFeedback(ModelStackWithAutoParam* modelStackWithParam, bool isAutomation) {
+	if (!runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::MidiInputAutoFeedback)) {
+		return;
+	}
+	// Per-tick automation mirroring is out of scope here (the heavy working-set case); only echo discrete
+	// local edits (modelStackWithParam set) and context changes (null: clip/instrument select, playback start).
+	if (isAutomation) {
+		return;
+	}
+	// Learned-knob feedback only applies to a clip's instrument, not song params.
+	if (!isClipContext()) {
+		return;
+	}
+	ModControllable* modControllable = activeModControllableModelStack.modControllable;
+	ParamManager* paramManager = activeModControllableModelStack.paramManager;
+	TimelineCounter* timelineCounter = activeModControllableModelStack.getTimelineCounterAllowNull();
+	if (modControllable == nullptr || paramManager == nullptr || timelineCounter == nullptr) {
+		return;
+	}
+	// Rebuild the active context's "three main things" in a fresh MODEL_STACK_MAX_SIZE buffer: the resolver
+	// (getParamFromMIDIKnob -> addParamCollectionAndId) overlays larger stack structs in place, which would
+	// overflow the bare activeModControllableModelStack member — it must run on a full-size buffer.
+	char modelStackMemory[MODEL_STACK_MAX_SIZE];
+	ModelStackWithThreeMainThings* modelStack = setupModelStackWithSong(modelStackMemory, currentSong)
+	                                                ->addTimelineCounter(timelineCounter)
+	                                                ->addOtherTwoThingsButNoNoteRow(modControllable, paramManager);
+	// Virtual: a no-op unless this mod-controllable owns MIDI-learned knobs (ModControllableAudio).
+	modControllable->sendLearnedKnobFeedback(modelStack, modelStackWithParam);
 }
 
 // sets flag to let caller know if we are dealing with clip context

@@ -52,6 +52,12 @@ public:
 	/// Check that autoParam isn't NULL, after calling this
 	virtual ModelStackWithAutoParam* getParamFromMIDIKnob(MIDIKnob& knob, ModelStackWithThreeMainThings* modelStack);
 
+	/// Echo MIDI-learned-knob values out to their controllers so the controller mirrors the Deluge.
+	/// `editedParam` non-null = per-edit echo (only the knob bound to that param); null = context-sync (all
+	/// learned knobs). No-op for mod-controllables that don't own learned knobs; see ModControllableAudio.
+	virtual void sendLearnedKnobFeedback(ModelStackWithThreeMainThings* modelStack,
+	                                     ModelStackWithAutoParam* editedParam) {}
+
 	virtual uint8_t* getModKnobMode(); // Return NULL if different modes not supported
 	virtual bool isKit() { return false; }
 	virtual bool isSong() { return false; }
