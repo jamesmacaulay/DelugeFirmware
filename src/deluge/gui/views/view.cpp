@@ -52,6 +52,7 @@
 #include "io/midi/midi_device.h"
 #include "io/midi/midi_device_manager.h"
 #include "io/midi/midi_engine.h"
+#include "io/midi/midi_feedback_working_set.h"
 #include "io/midi/midi_follow.h"
 #include "lib/printf.h"
 #include "model/action/action_logger.h"
@@ -1689,6 +1690,15 @@ void View::notifyParamAutomationOccurred(ParamManager* paramManager, bool update
 }
 
 void View::sendMidiFollowFeedback(ModelStackWithAutoParam* modelStackWithParam, int32_t knobPos, bool isAutomation) {
+	// Record the edit in the shared feedback working set (A3). Deluge-side touches (gold knob / menu /
+	// automation pad) all funnel through here with the param set. Skip context-sync (no param) and automation
+	// playback (isAutomation) — neither is a user touch.
+	if (modelStackWithParam && modelStackWithParam->autoParam && !isAutomation) {
+		midiFeedbackWorkingSet.recordTouch(modelStackWithParam->modControllable,
+		                                   modelStackWithParam->paramCollection->getParamKind(),
+		                                   modelStackWithParam->paramId);
+	}
+
 	// Independent of follow's feedback channel: echo learned-knob values to their own controllers.
 	sendLearnedKnobFeedback(modelStackWithParam, isAutomation);
 

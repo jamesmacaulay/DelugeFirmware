@@ -30,6 +30,7 @@
 #include "io/debug/log.h"
 #include "io/midi/midi_device.h"
 #include "io/midi/midi_engine.h"
+#include "io/midi/midi_feedback_working_set.h"
 #include "io/midi/midi_takeover.h"
 #include "mem_functions.h"
 #include "model/clip/audio_clip.h"
@@ -1189,6 +1190,12 @@ bool ModControllableAudio::offerReceivedCCToLearnedParamsForClip(MIDICable& cabl
 				// Set the new Parameter Value for the MIDI Learned Parameter
 				modelStackWithParam->autoParam->setValuePossiblyForRegion(newValue, modelStackWithParam, modPos,
 				                                                          modLength);
+
+				// Controller-side touch: warm this param in the shared feedback working set (A3) so the other
+				// feedback consumers will mirror it.
+				midiFeedbackWorkingSet.recordTouch(modelStackWithParam->modControllable,
+				                                   modelStackWithParam->paramCollection->getParamKind(),
+				                                   modelStackWithParam->paramId);
 
 				// if you're in automation view and editing the same parameter that was just updated
 				// by a learned midi knob, then re-render the pads on the automation editor grid

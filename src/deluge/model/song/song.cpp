@@ -34,6 +34,7 @@
 #include "hid/matrix/matrix_driver.h"
 #include "io/midi/device_specific/specific_midi_device.h"
 #include "io/midi/midi_engine.h"
+#include "io/midi/midi_feedback_working_set.h"
 #include "memory/general_memory_allocator.h"
 #include "model/action/action_logger.h"
 #include "model/clip/audio_clip.h"
@@ -206,6 +207,10 @@ Song::Song() : backedUpParamManagers(sizeof(BackedUpParamManager)) {
 }
 
 Song::~Song() {
+
+	// The feedback working set holds mod-controllable pointers from this song; they're about to become
+	// invalid, so forget them (a fresh song could reuse the addresses).
+	midiFeedbackWorkingSet.clear();
 
 	// Delete existing Clips, if any
 	for (int32_t c = 0; c < sessionClips.getNumElements(); c++) {
