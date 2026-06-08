@@ -1677,12 +1677,15 @@ void View::notifyParamAutomationOccurred(ParamManager* paramManager, bool update
 		}
 	}
 
-	// MIDI-follow automation feedback is NOT limited to the viewed context: the send path resolves follow's
-	// own target (getSelectedOrActiveClip), so the timer must also be armed when automation occurs on a clip
-	// that isn't being viewed — e.g. the active clip while you're in song/grid view, where the viewed context
-	// is the song and never matches a clip's paramManager. Arm it whenever follow feedback is enabled; the
-	// send path filters to follow's target, so a background clip's automation won't be mis-sent.
-	if (isViewedContext || midiEngine.midiFollowFeedbackChannelType != MIDIFollowChannelType::NONE) {
+	// Automation feedback is NOT limited to the viewed context: each consumer's send path resolves its own
+	// target, so the timer must also be armed when automation occurs on a clip that isn't being viewed — e.g.
+	// the active clip while you're in song/grid view, where the viewed context is the song and never matches a
+	// clip's paramManager. Arm it whenever a consumer wants automation feedback: MIDI-follow (its channel set)
+	// or learned knobs (MidiInputAutoFeedback). The send paths filter to their own targets / working set, so a
+	// background clip's automation isn't mis-sent. The send rate is still gated by the follow automation-
+	// feedback rate in the timer handler (DISABLED = off for both consumers).
+	if (isViewedContext || midiEngine.midiFollowFeedbackChannelType != MIDIFollowChannelType::NONE
+	    || runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::MidiInputAutoFeedback)) {
 		if (!uiTimerManager.isTimerSet(TimerName::SEND_MIDI_FEEDBACK_FOR_AUTOMATION)) {
 			uiTimerManager.setTimer(TimerName::SEND_MIDI_FEEDBACK_FOR_AUTOMATION, 25);
 		}
@@ -1788,9 +1791,11 @@ void View::sendLearnedKnobFeedback(ModelStackWithAutoParam* modelStackWithParam,
 	if (!runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::MidiInputAutoFeedback)) {
 		return;
 	}
-	// Per-tick automation mirroring is out of scope here (the heavy working-set case); only echo discrete
-	// local edits (modelStackWithParam set) and context changes (null: clip/instrument select, playback start).
+	// Per-tick automation mirror: handled separately, because automation can move params on instruments other
+	// than the one being viewed, so it iterates all active clips rather than the viewed context. Bounded to the
+	// recently-touched working set so it doesn't flood the bus every tick.
 	if (isAutomation) {
+		sendLearnedKnobAutomationFeedback();
 		return;
 	}
 	// Learned-knob feedback only applies to a clip's instrument, not song params.
@@ -1812,6 +1817,22 @@ void View::sendLearnedKnobFeedback(ModelStackWithAutoParam* modelStackWithParam,
 	                                                ->addOtherTwoThingsButNoNoteRow(modControllable, paramManager);
 	// Virtual: a no-op unless this mod-controllable owns MIDI-learned knobs (ModControllableAudio).
 	modControllable->sendLearnedKnobFeedback(modelStack, modelStackWithParam);
+}
+
+void View::sendLearnedKnobAutomationFeedback() {
+	// Per-tick automation mirror for learned knobs (MidiInputAutoFeedback already confirmed on by the caller).
+	// Iterate every live active-clip output and send each learned knob that is automated AND in the
+	// recently-touched working set. Two reasons it iterates live outputs rather than the viewed context or the
+	// ring's stored pointers: (1) automation can be moving params on instruments you aren't viewing; (2) the
+	// ring is only ever used as a membership filter, never dereferenced, so a stale ModControllable pointer
+	// from a deleted instrument can't be touched here. The send rate is throttled by the timer that calls us.
+	char modelStackMemory[MODEL_STACK_MAX_SIZE];
+	ModelStack* modelStack = setupModelStackWithSong(modelStackMemory, currentSong);
+	for (Output* output = currentSong->firstOutput; output; output = output->next) {
+		if (Clip* activeClip = output->getActiveClip()) {
+			output->sendLearnedKnobFeedbackForClip(modelStack->addTimelineCounter(activeClip), /*forAutomation=*/true);
+		}
+	}
 }
 
 // sets flag to let caller know if we are dealing with clip context

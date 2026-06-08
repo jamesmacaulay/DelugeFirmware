@@ -1051,11 +1051,12 @@ ModelStackWithThreeMainThings* ModControllableAudio::addNoteRowIndexAndStuff(Mod
 }
 
 void ModControllableAudio::sendLearnedKnobFeedback(ModelStackWithThreeMainThings* modelStack,
-                                                   ModelStackWithAutoParam* editedParam) {
-	// Per-edit echo (editedParam set) / context-sync (editedParam null). The caller (View) gates on the
-	// MidiInputAutoFeedback flag and clip context. Loop-safety: an echoed value re-enters learned-knob input
-	// as a CC equal to the current value, which the value-equality no-op in setParamFromCC drops (no change
-	// -> no re-echo), so no extra guard is needed here.
+                                                   ModelStackWithAutoParam* editedParam, bool forAutomation) {
+	// Per-edit echo (editedParam set) / context-sync (editedParam null) / per-tick automation mirror
+	// (forAutomation). The caller (View) gates on the MidiInputAutoFeedback flag and clip context.
+	// Loop-safety: an echoed value re-enters learned-knob input as a CC equal to the current value, which the
+	// value-equality no-op in offerReceivedCCToLearnedParamsForClip/ForSong drops (no change -> no re-echo),
+	// so no extra guard is needed here.
 	for (MIDIKnob& knob : midi_knobs) {
 		ModelStackWithAutoParam* knobParam = getParamFromMIDIKnob(knob, modelStack);
 		if (!knobParam || !knobParam->autoParam) {
@@ -1067,6 +1068,17 @@ void ModControllableAudio::sendLearnedKnobFeedback(ModelStackWithThreeMainThings
 		if (editedParam && knobParam->autoParam != editedParam->autoParam) {
 			continue;
 		}
+		// Per-tick automation mirror: bound to params that are actually automated AND in the recently-touched
+		// working set, so it tracks the controls you're working with without flooding the bus every tick.
+		if (forAutomation) {
+			if (!knobParam->autoParam->isAutomated()) {
+				continue;
+			}
+			if (!midiFeedbackWorkingSet.isTouched(this, knobParam->paramCollection->getParamKind(),
+			                                      knobParam->paramId)) {
+				continue;
+			}
+		}
 		int32_t knobPos =
 		    knobParam->paramCollection->paramValueToKnobPos(knobParam->autoParam->getCurrentValue(), knobParam);
 		sendLearnedKnobFeedbackToController(knob, knobPos);
@@ -1074,12 +1086,13 @@ void ModControllableAudio::sendLearnedKnobFeedback(ModelStackWithThreeMainThings
 }
 
 void ModControllableAudio::sendLearnedKnobFeedbackForClip(ModelStackWithTimelineCounter* modelStack,
-                                                          int32_t noteRowIndex) {
+                                                          int32_t noteRowIndex, bool forAutomation) {
 	// Build this mod-controllable's "three main things" for the given clip (mirroring the learned-knob *input*
-	// path's addNoteRowIndexAndStuff), then context-sync all its learned knobs. Unlike the View-hook path this
-	// doesn't read activeModControllableModelStack, so it works for a clip that isn't the one being viewed.
+	// path's addNoteRowIndexAndStuff), then sync its learned knobs. Unlike the View-hook path this doesn't read
+	// activeModControllableModelStack, so it works for a clip that isn't the one being viewed. forAutomation
+	// limits the send to automated params that are in the recently-touched working set (the per-tick mirror).
 	ModelStackWithThreeMainThings* modelStackWithThreeMainThings = addNoteRowIndexAndStuff(modelStack, noteRowIndex);
-	sendLearnedKnobFeedback(modelStackWithThreeMainThings, nullptr);
+	sendLearnedKnobFeedback(modelStackWithThreeMainThings, nullptr, forAutomation);
 }
 
 void ModControllableAudio::sendLearnedKnobFeedbackToController(MIDIKnob& knob, int32_t knobPos) {

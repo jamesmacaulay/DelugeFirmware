@@ -150,8 +150,12 @@ public:
 	void sendFeedbackForAllActiveClips();
 	// MIDI-learned-knob feedback (MidiInputAutoFeedback, default off): echo the active instrument's learned
 	// knobs out to their controllers — per-edit echo (modelStackWithParam set) and context-sync (null). Fired
-	// from sendMidiFollowFeedback's call sites; skips the per-tick automation mirror (isAutomation).
+	// from sendMidiFollowFeedback's call sites; the per-tick automation case (isAutomation) defers to
+	// sendLearnedKnobAutomationFeedback.
 	void sendLearnedKnobFeedback(ModelStackWithAutoParam* modelStackWithParam, bool isAutomation);
+	// Per-tick automation mirror for learned knobs: sends automated learned knobs across all active clips that
+	// are in the recently-touched working set (bounds the per-tick traffic). Driven by the automation timer.
+	void sendLearnedKnobAutomationFeedback();
 	// Follow's shared-channel feedback (the channel block factored out of sendMidiFollowFeedback so the
 	// explicit-clip seam can reuse it). Sends only in clip context, to follow's resolved target.
 	void sendFollowFeedback(ModelStackWithAutoParam* modelStackWithParam, int32_t knobPos, bool isAutomation);

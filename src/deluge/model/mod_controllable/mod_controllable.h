@@ -55,14 +55,17 @@ public:
 
 	/// Echo MIDI-learned-knob values out to their controllers so the controller mirrors the Deluge.
 	/// `editedParam` non-null = per-edit echo (only the knob bound to that param); null = context-sync (all
-	/// learned knobs). No-op for mod-controllables that don't own learned knobs; see ModControllableAudio.
+	/// learned knobs). `forAutomation` = per-tick mirror: only automated params in the recently-touched
+	/// working set. No-op for mod-controllables that don't own learned knobs; see ModControllableAudio.
 	virtual void sendLearnedKnobFeedback(ModelStackWithThreeMainThings* modelStack,
-	                                     ModelStackWithAutoParam* editedParam) {}
+	                                     ModelStackWithAutoParam* editedParam, bool forAutomation = false) {}
 
-	/// Context-sync this mod-controllable's learned knobs for an explicit clip (not the viewed context) — e.g.
-	/// a clip cue-launched while unviewed. `noteRowIndex` -1 = whole instrument / kit-global; >=0 = that drum's
-	/// NoteRow. Builds the param stack itself from the clip. No-op base; see ModControllableAudio.
-	virtual void sendLearnedKnobFeedbackForClip(ModelStackWithTimelineCounter* modelStack, int32_t noteRowIndex) {}
+	/// Sync this mod-controllable's learned knobs for an explicit clip (not the viewed context) — e.g. a clip
+	/// cue-launched while unviewed. `noteRowIndex` -1 = whole instrument / kit-global; >=0 = that drum's
+	/// NoteRow. `forAutomation` limits it to the per-tick mirror set (automated + recently touched). Builds the
+	/// param stack itself from the clip. No-op base; see ModControllableAudio.
+	virtual void sendLearnedKnobFeedbackForClip(ModelStackWithTimelineCounter* modelStack, int32_t noteRowIndex,
+	                                            bool forAutomation = false) {}
 
 	virtual uint8_t* getModKnobMode(); // Return NULL if different modes not supported
 	virtual bool isKit() { return false; }

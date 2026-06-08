@@ -585,10 +585,10 @@ Clip* Output::getActiveClip() const {
 	return activeClip;
 }
 
-void Output::sendLearnedKnobFeedbackForClip(ModelStackWithTimelineCounter* modelStack) {
+void Output::sendLearnedKnobFeedbackForClip(ModelStackWithTimelineCounter* modelStack, bool forAutomation) {
 	// Single-instrument outputs (synth/MIDI/CV): the whole clip maps to one mod-controllable, no NoteRow.
 	if (ModControllable* modControllable = toModControllable()) {
-		modControllable->sendLearnedKnobFeedbackForClip(modelStack, -1);
+		modControllable->sendLearnedKnobFeedbackForClip(modelStack, -1, forAutomation);
 	}
 }
 

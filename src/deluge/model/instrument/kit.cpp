@@ -875,12 +875,12 @@ void Kit::offerReceivedCCToLearnedParams(MIDICable& cable, uint8_t channel, uint
 	}
 }
 
-void Kit::sendLearnedKnobFeedbackForClip(ModelStackWithTimelineCounter* modelStack) {
+void Kit::sendLearnedKnobFeedbackForClip(ModelStackWithTimelineCounter* modelStack, bool forAutomation) {
 	// Mirrors offerReceivedCCToLearnedParams' structure (kit-global + per-drum), but for *output* feedback.
 
 	// Kit-global (affect-entire) learned knobs.
 	if (ModControllable* modControllable = toModControllable()) {
-		modControllable->sendLearnedKnobFeedbackForClip(modelStack, -1);
+		modControllable->sendLearnedKnobFeedbackForClip(modelStack, -1, forAutomation);
 	}
 
 	// Each NoteRow / Drum's own learned knobs.
@@ -889,7 +889,7 @@ void Kit::sendLearnedKnobFeedbackForClip(ModelStackWithTimelineCounter* modelSta
 		for (int32_t i = 0; i < clip->noteRows.getNumElements(); i++) {
 			Drum* thisDrum = clip->noteRows.getElement(i)->drum;
 			if (thisDrum && thisDrum->type == DrumType::SOUND) {
-				((SoundDrum*)thisDrum)->sendLearnedKnobFeedbackForClip(modelStack, i);
+				((SoundDrum*)thisDrum)->sendLearnedKnobFeedbackForClip(modelStack, i, forAutomation);
 			}
 		}
 	}

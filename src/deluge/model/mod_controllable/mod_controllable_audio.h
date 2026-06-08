@@ -89,9 +89,10 @@ public:
 	bool hasBassAdjusted(ParamManager* paramManager);
 	bool hasTrebleAdjusted(ParamManager* paramManager);
 	ModelStackWithAutoParam* getParamFromMIDIKnob(MIDIKnob& knob, ModelStackWithThreeMainThings* modelStack) override;
-	void sendLearnedKnobFeedback(ModelStackWithThreeMainThings* modelStack,
-	                             ModelStackWithAutoParam* editedParam) override;
-	void sendLearnedKnobFeedbackForClip(ModelStackWithTimelineCounter* modelStack, int32_t noteRowIndex) override;
+	void sendLearnedKnobFeedback(ModelStackWithThreeMainThings* modelStack, ModelStackWithAutoParam* editedParam,
+	                             bool forAutomation = false) override;
+	void sendLearnedKnobFeedbackForClip(ModelStackWithTimelineCounter* modelStack, int32_t noteRowIndex,
+	                                    bool forAutomation = false) override;
 
 	// EQ
 	int32_t bassFreq{}; // These two should eventually not be variables like this
