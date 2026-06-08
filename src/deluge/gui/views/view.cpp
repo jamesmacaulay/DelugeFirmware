@@ -1658,9 +1658,11 @@ int32_t View::getModKnobMode() {
 }
 
 void View::notifyParamAutomationOccurred(ParamManager* paramManager, bool updateModLevels) {
-	if (paramManager == activeModControllableModelStack.paramManager
-	    || (getCurrentUI() == &soundEditor && paramManager == soundEditor.currentParamManager)) {
+	bool isViewedContext = (paramManager == activeModControllableModelStack.paramManager
+	                        || (getCurrentUI() == &soundEditor && paramManager == soundEditor.currentParamManager));
 
+	if (isViewedContext) {
+		// The on-screen automation display only tracks the viewed context.
 		// If timer wasn't set yet, set it now
 		if (!uiTimerManager.isTimerSet(TimerName::DISPLAY_AUTOMATION)) {
 			pendingParamAutomationUpdatesModLevels = updateModLevels;
@@ -1672,7 +1674,14 @@ void View::notifyParamAutomationOccurred(ParamManager* paramManager, bool update
 				pendingParamAutomationUpdatesModLevels = true;
 			}
 		}
+	}
 
+	// MIDI-follow automation feedback is NOT limited to the viewed context: the send path resolves follow's
+	// own target (getSelectedOrActiveClip), so the timer must also be armed when automation occurs on a clip
+	// that isn't being viewed — e.g. the active clip while you're in song/grid view, where the viewed context
+	// is the song and never matches a clip's paramManager. Arm it whenever follow feedback is enabled; the
+	// send path filters to follow's target, so a background clip's automation won't be mis-sent.
+	if (isViewedContext || midiEngine.midiFollowFeedbackChannelType != MIDIFollowChannelType::NONE) {
 		if (!uiTimerManager.isTimerSet(TimerName::SEND_MIDI_FEEDBACK_FOR_AUTOMATION)) {
 			uiTimerManager.setTimer(TimerName::SEND_MIDI_FEEDBACK_FOR_AUTOMATION, 25);
 		}
