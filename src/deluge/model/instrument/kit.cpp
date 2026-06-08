@@ -875,6 +875,26 @@ void Kit::offerReceivedCCToLearnedParams(MIDICable& cable, uint8_t channel, uint
 	}
 }
 
+void Kit::sendLearnedKnobFeedbackForClip(ModelStackWithTimelineCounter* modelStack) {
+	// Mirrors offerReceivedCCToLearnedParams' structure (kit-global + per-drum), but for *output* feedback.
+
+	// Kit-global (affect-entire) learned knobs.
+	if (ModControllable* modControllable = toModControllable()) {
+		modControllable->sendLearnedKnobFeedbackForClip(modelStack, -1);
+	}
+
+	// Each NoteRow / Drum's own learned knobs.
+	if (modelStack->timelineCounterIsSet()) {
+		InstrumentClip* clip = (InstrumentClip*)modelStack->getTimelineCounter();
+		for (int32_t i = 0; i < clip->noteRows.getNumElements(); i++) {
+			Drum* thisDrum = clip->noteRows.getElement(i)->drum;
+			if (thisDrum && thisDrum->type == DrumType::SOUND) {
+				((SoundDrum*)thisDrum)->sendLearnedKnobFeedbackForClip(modelStack, i);
+			}
+		}
+	}
+}
+
 // not updated for midi follow, this seems dumb and is just left for backwards compatibility
 /// Pitch bend is available in the mod matrix as X and shouldn't be learned to params anymore (post 4.0)
 bool Kit::offerReceivedPitchBendToLearnedParams(MIDICable& cable, uint8_t channel, uint8_t data1, uint8_t data2,

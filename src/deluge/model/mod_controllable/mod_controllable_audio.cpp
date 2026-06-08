@@ -1072,6 +1072,15 @@ void ModControllableAudio::sendLearnedKnobFeedback(ModelStackWithThreeMainThings
 	}
 }
 
+void ModControllableAudio::sendLearnedKnobFeedbackForClip(ModelStackWithTimelineCounter* modelStack,
+                                                          int32_t noteRowIndex) {
+	// Build this mod-controllable's "three main things" for the given clip (mirroring the learned-knob *input*
+	// path's addNoteRowIndexAndStuff), then context-sync all its learned knobs. Unlike the View-hook path this
+	// doesn't read activeModControllableModelStack, so it works for a clip that isn't the one being viewed.
+	ModelStackWithThreeMainThings* modelStackWithThreeMainThings = addNoteRowIndexAndStuff(modelStack, noteRowIndex);
+	sendLearnedKnobFeedback(modelStackWithThreeMainThings, nullptr);
+}
+
 void ModControllableAudio::sendLearnedKnobFeedbackToController(MIDIKnob& knob, int32_t knobPos) {
 	// Relative encoders have no absolute position to show or seek.
 	if (knob.relative) {
