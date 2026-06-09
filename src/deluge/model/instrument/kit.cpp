@@ -901,7 +901,8 @@ void Kit::offerReceivedCCToDefaultMap(MIDICable& cable, uint8_t channel, uint8_t
 			Clip* clip = (Clip*)modelStack->getTimelineCounter();
 			ModelStackWithAutoParam* modelStackWithParam =
 			    getModelStackWithParamForKit(modelStack, clip, globalParamId, params::Kind::UNPATCHED_GLOBAL, false);
-			midiFollow.setParamFromCC(modelStackWithParam, clip, ccNumber, value, modPos, modLength, isStepEditing);
+			midiFollow.setParamFromCC(modelStackWithParam, clip, ccNumber, value, modPos, modLength, isStepEditing,
+			                          channel);
 		}
 	}
 

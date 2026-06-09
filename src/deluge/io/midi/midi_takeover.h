@@ -23,5 +23,6 @@
 
 namespace MidiTakeover {
 int32_t calculateKnobPos(int32_t knobPos, int32_t ccValue, MIDIKnob* knob = nullptr, bool doingMidiFollow = false,
-                         int32_t ccNumber = MIDI_CC_NONE, bool isStepEditing = false);
+                         int32_t ccNumber = MIDI_CC_NONE, bool isStepEditing = false,
+                         int32_t channel = MIDI_CHANNEL_NONE);
 } // namespace MidiTakeover

@@ -83,7 +83,7 @@ void SoundDrum::offerReceivedCCToDefaultMap(MIDICable& cable, uint8_t channel, u
 	}
 
 	midiFollow.setParamFromCC(modelStackWithParam, (Clip*)modelStack->getTimelineCounter(), ccNumber, value, modPos,
-	                          modLength, isStepEditing);
+	                          modLength, isStepEditing, channel);
 }
 
 bool SoundDrum::readTagFromFile(Deserializer& reader, char const* tagName) {

@@ -91,7 +91,7 @@ void SoundInstrument::offerReceivedCCToDefaultMap(MIDICable& cable, uint8_t chan
 	if (!modelStack->timelineCounterIsSet()) {
 		return;
 	}
-	midiFollow.handleReceivedCC(*modelStack, (Clip*)modelStack->getTimelineCounter(), ccNumber, value);
+	midiFollow.handleReceivedCC(*modelStack, (Clip*)modelStack->getTimelineCounter(), ccNumber, value, channel);
 }
 
 // arpSettings optional - no need if you're loading a new V2.0 song where Instruments are all separate from Clips and
