@@ -850,7 +850,8 @@ void MidiFollow::handleReceivedCC(ModelStackWithTimelineCounter& modelStackWithT
 			// mode don't display popup if you're currently editing the same param
 			if (midiEngine.midiFollowDisplayParam && !editingParamInAutomationOrPerformanceView) {
 				params::Kind kind = modelStackWithParam->paramCollection->getParamKind();
-				view.displayModEncoderValuePopup(kind, modelStackWithParam->paramId, newKnobPos);
+				view.displayModEncoderValuePopup(kind, modelStackWithParam->paramId, newKnobPos, PatchSource::NONE,
+				                                 PatchSource::NONE, modelStackWithParam->autoParam->landscape);
 			}
 		}
 	}
