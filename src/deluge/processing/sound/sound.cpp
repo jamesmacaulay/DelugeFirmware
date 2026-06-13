@@ -3733,7 +3733,11 @@ bool Sound::readParamTagFromFile(Deserializer& reader, char const* tagName, Para
 	ParamCollectionSummary* patchedParamsSummary = paramManager->getPatchedParamSetSummary();
 	PatchedParamSet* patchedParams = (PatchedParamSet*)patchedParamsSummary->paramCollection;
 
-	if (!strcmp(tagName, "portamento")) {
+	if (!strcmp(tagName, "patchedParamLandscapes")) {
+		patchedParams->readLandscapes(reader, patchedParamsSummary);
+		reader.exitTag("patchedParamLandscapes");
+	}
+	else if (!strcmp(tagName, "portamento")) {
 		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_PORTAMENTO, readAutomationUpToPos);
 		reader.exitTag("portamento");
 	}
@@ -4017,6 +4021,12 @@ void Sound::writeParamsToFile(Serializer& writer, ParamManager* paramManager, bo
 
 	PatchedParamSet* patchedParams = paramManager->getPatchedParamSet();
 	UnpatchedParamSet* unpatchedParams = paramManager->getUnpatchedParamSet();
+
+	// Transformation spaces are per-clip state, so they travel with automation (song contexts),
+	// not with presets. The unpatched set's are written by ModControllableAudio further down.
+	if (writeAutomation) {
+		patchedParams->writeLandscapesAsAttribute(writer, "patchedParamLandscapes");
+	}
 
 	unpatchedParams->writeParamAsAttribute(writer, "portamento", params::UNPATCHED_PORTAMENTO, writeAutomation);
 	unpatchedParams->writeParamAsAttribute(writer, "compressorShape", params::UNPATCHED_SIDECHAIN_SHAPE,
