@@ -1088,8 +1088,11 @@ void ModControllableAudio::sendLearnedKnobFeedback(ModelStackWithThreeMainThings
 				continue;
 			}
 		}
-		int32_t knobPos =
-		    knobParam->paramCollection->paramValueToKnobPos(knobParam->autoParam->getCurrentValue(), knobParam);
+		// Mirror the value the knob actually drives: for a landscape param that's the INDEX, not
+		// getCurrentValue()'s transformed output. Matches the takeover path below and midi_follow's
+		// CC feedback (getValuePossiblyAtPos(-1)); for non-landscape params it's identical to getCurrentValue().
+		int32_t knobPos = knobParam->paramCollection->paramValueToKnobPos(
+		    knobParam->autoParam->getValuePossiblyAtPos(-1, knobParam), knobParam);
 		sendLearnedKnobFeedbackToController(knob, knobPos);
 	}
 }
