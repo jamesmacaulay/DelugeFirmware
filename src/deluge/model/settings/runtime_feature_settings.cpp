@@ -200,6 +200,11 @@ void RuntimeFeatureSettings::init() {
 	SetupOnOffSetting(settings[RuntimeFeatureSettingType::ShowBatteryLevel],
 	                  STRING_FOR_COMMUNITY_FEATURE_SHOW_BATTERY_LEVEL, "showBatteryLevel",
 	                  RuntimeFeatureStateToggle::On);
+
+	// Transformation-space slide morph (phase-aware morphing between saved positions); Off =
+	// pointwise crossfade everywhere
+	SetupOnOffSetting(settings[RuntimeFeatureSettingType::SlideMorph], STRING_FOR_COMMUNITY_FEATURE_SLIDE_MORPH,
+	                  "slideMorph", RuntimeFeatureStateToggle::Off);
 }
 
 void RuntimeFeatureSettings::readSettingsFromFile() {

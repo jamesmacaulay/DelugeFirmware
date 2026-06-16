@@ -27,6 +27,7 @@
 #include "model/consequence/consequence_clip_existence.h"
 #include "model/consequence/consequence_clip_instance_existence.h"
 #include "model/consequence/consequence_clip_length.h"
+#include "model/consequence/consequence_landscape_change.h"
 #include "model/consequence/consequence_note_array_change.h"
 #include "model/consequence/consequence_note_existence.h"
 #include "model/consequence/consequence_param_change.h"
@@ -152,6 +153,21 @@ bool Action::containsConsequenceParamChange(ParamCollection* paramCollection, in
 			ConsequenceParamChange* thisConsParamChange = (ConsequenceParamChange*)thisCons;
 			if (thisConsParamChange->modelStack.paramCollection == paramCollection
 			    && thisConsParamChange->modelStack.paramId == paramId) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+bool Action::containsConsequenceLandscapeChange(ParamCollection* paramCollection, int32_t paramId) {
+	// See if this param's landscape has already been snapshotted into this action. Used so a
+	// coalesced drag (one Action, many encoder pulses) only snapshots the before-state once.
+	for (Consequence* thisCons = firstConsequence; thisCons; thisCons = thisCons->next) {
+		if (thisCons->type == Consequence::LANDSCAPE_CHANGE) {
+			ConsequenceLandscapeChange* thisConsLandscapeChange = (ConsequenceLandscapeChange*)thisCons;
+			if (thisConsLandscapeChange->modelStack.paramCollection == paramCollection
+			    && thisConsLandscapeChange->modelStack.paramId == paramId) {
 				return true;
 			}
 		}

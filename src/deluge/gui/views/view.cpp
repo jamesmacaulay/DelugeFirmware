@@ -875,7 +875,8 @@ void View::modEncoderAction_existentParam(int32_t whichModEncoder, int32_t offse
 				source2 = paramDescriptor.getTopLevelSource();
 			}
 		}
-		displayModEncoderValuePopup(kind, modelStackWithParam->paramId, newKnobPos, source1, source2);
+		displayModEncoderValuePopup(kind, modelStackWithParam->paramId, newKnobPos, source1, source2,
+		                            modelStackWithParam->autoParam && modelStackWithParam->autoParam->landscape);
 	}
 
 	if (newKnobPos == knobPos) {
@@ -1067,7 +1068,7 @@ void View::potentiallyMakeItHarderToTurnKnob(int32_t whichModEncoder, ModelStack
 }
 
 void View::displayModEncoderValuePopup(params::Kind kind, int32_t paramID, int32_t newKnobPos, PatchSource source1,
-                                       PatchSource source2) {
+                                       PatchSource source2, bool isLandscapeIndexed) {
 
 	// Cache last displayed values to avoid unnecessary notifications
 	static params::Kind last_param_kind = params::Kind::NONE;
@@ -1133,6 +1134,14 @@ void View::displayModEncoderValuePopup(params::Kind kind, int32_t paramID, int32
 			if (name != l10n::get(l10n::String::STRING_FOR_NONE)) {
 				parameter_name.append(name);
 			}
+		}
+
+		// Transformation space: mark that the gold knob is driving the INDEX of a landscape
+		// param (matches the automation view's "(INDEXED)" suffix). OLED only — the 7SEG popup
+		// shows no param name.
+		if (isLandscapeIndexed) {
+			parameter_name.append(" ");
+			parameter_name.append(deluge::l10n::get(deluge::l10n::String::STRING_FOR_LANDSCAPE_INDEXED));
 		}
 	}
 

@@ -59,6 +59,7 @@
 #include "model/clip/clip.h"
 #include "model/clip/instrument_clip.h"
 #include "model/consequence/consequence_instrument_clip_multiply.h"
+#include "model/consequence/consequence_landscape_change.h"
 #include "model/consequence/consequence_note_array_change.h"
 #include "model/consequence/consequence_note_row_horizontal_shift.h"
 #include "model/consequence/consequence_note_row_length.h"
@@ -75,6 +76,7 @@
 #include "model/settings/runtime_feature_settings.h"
 #include "model/song/song.h"
 #include "modulation/automation/auto_param.h"
+#include "modulation/automation/param_landscape.h"
 #include "modulation/params/param.h"
 #include "modulation/params/param_manager.h"
 #include "modulation/params/param_node.h"
@@ -103,6 +105,9 @@ extern "C" {
 
 namespace params = deluge::modulation::params;
 using deluge::modulation::params::kNoParamID;
+
+// Defined further down with the other landscape-op helpers.
+static void addLandscapeChangeConsequence(Action* action, ModelStackWithAutoParam const* modelStackWithParam);
 using deluge::modulation::params::ParamType;
 using deluge::modulation::params::patchedParamShortcuts;
 using deluge::modulation::params::unpatchedGlobalParamShortcuts;
@@ -574,6 +579,33 @@ void AutomationView::openedInBackground() {
 
 // used for the play cursor
 void AutomationView::graphicsRoutine() {
+	// Landscape upkeep (transform mode or not — the overlay renders in plain views too):
+	// when the index moves under the engine's feet (automated index, fired quantised recalls),
+	// the grid overlay and sidebar marker go stale, since stock never re-renders the grid on
+	// value changes. Watch the index at knob granularity and refresh both. Also keep an
+	// armed-recall slot blinking.
+	if (!onArrangerView && inAutomationEditor()) {
+		char modelStackMemory[MODEL_STACK_MAX_SIZE];
+		ModelStackWithTimelineCounter* modelStack = currentSong->setupModelStackWithCurrentClip(modelStackMemory);
+		ModelStackWithAutoParam* modelStackWithParam = getModelStackWithParamForClipRaw(modelStack, getCurrentClip());
+		if (modelStackWithParam && modelStackWithParam->autoParam && modelStackWithParam->autoParam->landscape) {
+			if (landscapeTransformMode && modelStackWithParam->autoParam->landscape->pendingRecallSlot >= 0) {
+				uiNeedsRendering(&automationView, 0, 0xFFFFFFFF); // Blink.
+			}
+			// Keep the CROSS SCREEN LED honest: various view transitions (e.g. via the
+			// automation overview) set it for their own purposes without knowing about
+			// transform mode.
+			indicator_leds::setLedState(IndicatorLED::CROSS_SCREEN_EDIT, landscapeTransformMode);
+			int32_t indexKnobPos = modelStackWithParam->paramCollection->paramValueToKnobPos(
+			                           modelStackWithParam->autoParam->getCurrentIndexValue(), modelStackWithParam)
+			                       + kKnobPosOffset;
+			if (indexKnobPos != lastRenderedIndexKnobPos) {
+				lastRenderedIndexKnobPos = indexKnobPos;
+				uiNeedsRendering(&automationView);
+			}
+		}
+	}
+
 	if (onArrangerView) {
 		arrangerView.graphicsRoutine();
 	}
@@ -859,8 +891,10 @@ void AutomationView::renderAutomationOverview(ModelStackWithTimelineCounter* mod
 			}
 
 			if (modelStackWithParam && modelStackWithParam->autoParam) {
-				// highlight pad white if the parameter it represents is currently automated
-				if (modelStackWithParam->autoParam->isAutomated()) {
+				// highlight pad white if the parameter it represents is currently automated —
+				// a transformation space counts (its lanes ARE the automation), whether or not
+				// the index lane itself is automated
+				if (modelStackWithParam->autoParam->isAutomated() || modelStackWithParam->autoParam->landscape) {
 					pixel = {
 					    .r = 130,
 					    .g = 120,
@@ -933,9 +967,105 @@ bool AutomationView::renderSidebar(uint32_t whichRows, RGB image[][kDisplayWidth
 	if (onArrangerView) {
 		return arrangerView.renderSidebar(whichRows, image, occupancyMask);
 	}
-	else {
-		return getCurrentClip()->renderSidebar(whichRows, image, occupancyMask);
+
+	bool rendered = getCurrentClip()->renderSidebar(whichRows, image, occupancyMask);
+
+	// Transform mode sidebars. LEFT column = lane slots: index pad (blue) on top, output pad
+	// (violet) below it, then saved positions stacked from the bottom, coloured green->red by
+	// their knob position; the viewed lane's pad is white. RIGHT column = knob-travel map:
+	// markers in their slot colours, white = viewed, blue = the live index. Gap pads are
+	// no-ops.
+	if (landscapeTransformMode && inAutomationEditor()) {
+		char modelStackMemory[MODEL_STACK_MAX_SIZE];
+		ModelStackWithTimelineCounter* modelStack = currentSong->setupModelStackWithCurrentClip(modelStackMemory);
+		ModelStackWithAutoParam* modelStackWithParam = getModelStackWithParamForClipRaw(modelStack, getCurrentClip());
+		if (modelStackWithParam && modelStackWithParam->autoParam
+		    && (modelStackWithParam->paramCollection->getParamKind() == params::Kind::PATCHED
+		        || modelStackWithParam->paramCollection->getParamKind() == params::Kind::UNPATCHED_SOUND
+		        || modelStackWithParam->paramCollection->getParamKind() == params::Kind::UNPATCHED_GLOBAL)) {
+			ParamLandscape* landscape = modelStackWithParam->autoParam->landscape; // may be null
+			int32_t laneView = getLandscapeView(modelStackWithParam->autoParam);
+
+			// Position-height gradient (mirrors the automation editor's VU colours).
+			static const RGB kPositionGradient[kDisplayHeight] = {{0, 255, 0},   {36, 219, 0},  {73, 182, 0},
+			                                                      {109, 146, 0}, {146, 109, 0}, {182, 73, 0},
+			                                                      {219, 36, 0},  {255, 0, 0}};
+
+			for (int32_t yDisplay = 0; yDisplay < kDisplayHeight; yDisplay++) {
+				if (!(whichRows & (1 << yDisplay))) {
+					continue;
+				}
+				image[yDisplay][kDisplayWidth] = colours::black;
+				image[yDisplay][kDisplayWidth + 1] = colours::black;
+				occupancyMask[yDisplay][kDisplayWidth] = 0;
+				occupancyMask[yDisplay][kDisplayWidth + 1] = 0;
+			}
+
+			// Left column slots.
+			if (whichRows & (1 << (kDisplayHeight - 1))) {
+				image[kDisplayHeight - 1][kDisplayWidth] =
+				    (laneView == kLandscapeViewValue) ? colours::white : RGB{0, 70, 255};
+				occupancyMask[kDisplayHeight - 1][kDisplayWidth] = 64;
+			}
+			if (landscape && (whichRows & (1 << (kDisplayHeight - 2)))) {
+				image[kDisplayHeight - 2][kDisplayWidth] =
+				    (laneView == kLandscapeViewOutput) ? colours::white : RGB{170, 0, 255};
+				occupancyMask[kDisplayHeight - 2][kDisplayWidth] = 64;
+			}
+			int32_t numNodes = landscape ? landscape->numNodes : 0;
+			for (int32_t i = 0; i < numNodes && i < kDisplayHeight - 2; i++) {
+				if (!(whichRows & (1 << i))) {
+					continue;
+				}
+				int32_t positionKnobPos = modelStackWithParam->paramCollection->paramValueToKnobPos(
+				                              landscape->nodes[i].position, modelStackWithParam)
+				                          + kKnobPosOffset;
+				int32_t positionRow =
+				    std::clamp<int32_t>(positionKnobPos * kDisplayHeight / 129, 0, kDisplayHeight - 1);
+				bool armedBlinkPhase =
+				    landscape && landscape->pendingRecallSlot == i && ((AudioEngine::audioSampleTimer >> 14) & 1);
+				image[i][kDisplayWidth] = armedBlinkPhase
+				                              ? colours::white
+				                              : ((i == laneView) ? colours::white : kPositionGradient[positionRow]);
+				if (landscape && landscape->pendingRecallSlot == i && !armedBlinkPhase && i != laneView) {
+					image[i][kDisplayWidth] = RGB{0, 70, 255}; // Armed: blinks blue/white.
+				}
+				occupancyMask[i][kDisplayWidth] = 64;
+			}
+
+			// Right column map: saves in slot colours, white = viewed, blue = live index.
+			for (int32_t i = 0; i < numNodes; i++) {
+				int32_t positionKnobPos = modelStackWithParam->paramCollection->paramValueToKnobPos(
+				                              landscape->nodes[i].position, modelStackWithParam)
+				                          + kKnobPosOffset;
+				int32_t yDisplay = std::clamp<int32_t>(positionKnobPos * kDisplayHeight / 129, 0, kDisplayHeight - 1);
+				if (!(whichRows & (1 << yDisplay))) {
+					continue;
+				}
+				if (i == laneView || image[yDisplay][kDisplayWidth + 1] != colours::white) {
+					image[yDisplay][kDisplayWidth + 1] =
+					    (i == laneView) ? colours::white
+					                    : kPositionGradient[std::clamp<int32_t>(positionKnobPos * kDisplayHeight / 129,
+					                                                            0, kDisplayHeight - 1)];
+				}
+				occupancyMask[yDisplay][kDisplayWidth + 1] = 64;
+			}
+			{
+				int32_t indexKnobPos = modelStackWithParam->paramCollection->paramValueToKnobPos(
+				                           modelStackWithParam->autoParam->getCurrentIndexValue(), modelStackWithParam)
+				                       + kKnobPosOffset;
+				int32_t yDisplay = std::clamp<int32_t>(indexKnobPos * kDisplayHeight / 129, 0, kDisplayHeight - 1);
+				lastRenderedIndexKnobPos = indexKnobPos;
+				if ((whichRows & (1 << yDisplay)) && image[yDisplay][kDisplayWidth + 1] != colours::white) {
+					image[yDisplay][kDisplayWidth + 1] = RGB{0, 70, 255};
+					occupancyMask[yDisplay][kDisplayWidth + 1] = 64;
+				}
+			}
+			return true;
+		}
 	}
+
+	return rendered;
 }
 
 /*render's what is displayed on OLED or 7SEG screens when in Automation View
@@ -1136,8 +1266,25 @@ ActionResult AutomationView::buttonAction(hid::Button b, bool on, bool inCardRou
 
 	using namespace hid::button;
 
+	// Accessibility: CROSS_SCREEN doubles as the held modifier for PLAY's restart-playhead
+	// shortcut. If PLAY is pressed while CROSS_SCREEN is armed, it's being used as that modifier,
+	// so cancel the deferred transform-mode toggle that would otherwise fire on its release.
+	if (on && b == PLAY && landscapeCrossScreenArmed) {
+		landscapeCrossScreenUsedAsModifier = true;
+	}
+
 	Clip* clip = getCurrentClip();
 	bool isAudioClip = clip->type == ClipType::AUDIO;
+
+	// Transformation space: holding LOAD (navigate) or SAVE (save-at-position) shows the
+	// sidebar navigator — refresh it on both edges of the press (not consumed; the buttons
+	// keep their normal arming behaviour).
+	if ((b == LOAD || b == SAVE) && !onArrangerView && inAutomationEditor()) {
+		if (b == LOAD && !on) {
+			loadMapCycleRow = -1; // Fresh cycle next hold.
+		}
+		uiNeedsRendering(&automationView, 0, 0xFFFFFFFF);
+	}
 
 	// these button actions are not used in the audio clip automation view
 	if (isAudioClip) {
@@ -1178,7 +1325,28 @@ ActionResult AutomationView::buttonAction(hid::Button b, bool on, bool inCardRou
 		if (onArrangerView || inNoteEditor()) {
 			handleCrossScreenButtonAction(on);
 		}
-		// don't toggle for automation editing
+		// Automation editor: CROSS SCREEN toggles transform mode (it was explicitly unused
+		// here, and unlike the old left-encoder push it can't nudge the param audibly).
+		else if (inAutomationEditor()) {
+			if (FlashStorage::accessibilityShortcuts) {
+				// CROSS_SCREEN is also the PLAY-restart modifier under accessibility (see the PLAY
+				// check at the top): defer the toggle to release and skip it if it was used as a
+				// modifier, so restarting the playhead doesn't flip the mode.
+				if (on) {
+					landscapeCrossScreenArmed = true;
+					landscapeCrossScreenUsedAsModifier = false;
+				}
+				else {
+					if (landscapeCrossScreenArmed && !landscapeCrossScreenUsedAsModifier) {
+						toggleLandscapeTransformMode();
+					}
+					landscapeCrossScreenArmed = false;
+				}
+			}
+			else if (on) {
+				toggleLandscapeTransformMode();
+			}
+		}
 		else {
 			return ActionResult::DEALT_WITH;
 		}
@@ -1683,6 +1851,364 @@ ActionResult AutomationView::padAction(int32_t x, int32_t y, int32_t velocity) {
 	// don't interact with sidebar if VU Meter is displayed
 	if (onArrangerView && x >= kDisplayWidth && view.displayVUMeter) {
 		return ActionResult::DEALT_WITH;
+	}
+
+	// Transform-mode sidebar taps. LEFT column = lane slots: tap to view; SAVE+index pad =
+	// bake; SAVE+slot = overwrite that save with the output; LOAD+slot = recall it;
+	// shift+SAVE+slot = delete it; output pad: save/load are no-ops (it's already what plays).
+	// RIGHT column = map: SAVE+tap saves AT the row; LOAD+tap parks at row-centre, repeated
+	// taps cycle onto each save in the row. Gap pads do nothing (and defuse the held dialog).
+	// Releasing a left-column slot pad ends any pad-held reposition gesture (the held flag drives
+	// the knob roles in modEncoderAction).
+	if (!onArrangerView && x == kDisplayWidth && !velocity && inAutomationEditor() && landscapeTransformMode) {
+		landscapeReposPadHeld = false;
+	}
+
+	if (!onArrangerView && x >= kDisplayWidth && velocity && inAutomationEditor() && landscapeTransformMode) {
+		char modelStackMemory[MODEL_STACK_MAX_SIZE];
+		ModelStackWithTimelineCounter* modelStackForSidebar =
+		    currentSong->setupModelStackWithCurrentClip(modelStackMemory);
+		ModelStackWithAutoParam* modelStackWithParam = getModelStackWithParamForClipRaw(modelStackForSidebar, clip);
+		if (modelStackWithParam && modelStackWithParam->autoParam
+		    && (modelStackWithParam->paramCollection->getParamKind() == params::Kind::PATCHED
+		        || modelStackWithParam->paramCollection->getParamKind() == params::Kind::UNPATCHED_SOUND
+		        || modelStackWithParam->paramCollection->getParamKind() == params::Kind::UNPATCHED_GLOBAL)) {
+			AutoParam* param = modelStackWithParam->autoParam;
+			ParamLandscape* landscape = param->landscape; // may be null
+			bool saveHeld = Buttons::isButtonPressed(deluge::hid::button::SAVE);
+			bool loadHeld = Buttons::isButtonPressed(deluge::hid::button::LOAD);
+
+			// Any consumed tap defuses the pending save/load dialog.
+			if (currentUIMode == UI_MODE_HOLDING_LOAD_BUTTON || currentUIMode == UI_MODE_HOLDING_SAVE_BUTTON) {
+				currentUIMode = UI_MODE_NONE;
+				indicator_leds::setLedState(IndicatorLED::LOAD, false);
+				indicator_leds::setLedState(IndicatorLED::SAVE, false);
+			}
+
+			int32_t numNodes = landscape ? landscape->numNodes : 0;
+
+			// ---- LEFT column: lane slots ----
+			if (x == kDisplayWidth) {
+				// Index pad (top).
+				if (y == kDisplayHeight - 1) {
+					if (saveHeld && Buttons::isShiftButtonPressed()) { // BAKE (destructive family).
+						if (!landscape) {
+							return ActionResult::DEALT_WITH;
+						}
+						Action* action =
+						    actionLogger.getNewAction(ActionType::LANDSCAPE_CHANGE, ActionAddition::NOT_ALLOWED);
+						addLandscapeChangeConsequence(action, modelStackWithParam);
+						Error error = param->flattenLandscape(modelStackWithParam);
+						if (error != Error::NONE) {
+							display->displayError(error);
+							return ActionResult::DEALT_WITH;
+						}
+						landscapeLaneView = kLandscapeViewValue;
+						display->displayPopup("BAKED TO VALUE");
+					}
+					else if (saveHeld) {
+						// Save the output AT the knob's current position (momentary value if
+						// the index is automated — the save clears that automation). Parked on
+						// an existing save, this is the duplicate gesture (nearest free step).
+						if (landscape && numNodes >= ParamLandscape::kMaxInteriorNodes) {
+							display->displayPopup(l10n::get(l10n::String::STRING_FOR_LANDSCAPE_MAX_CONTOURS));
+							return ActionResult::DEALT_WITH;
+						}
+						int32_t targetKnobPos128 =
+						    std::clamp<int32_t>(modelStackWithParam->paramCollection->paramValueToKnobPos(
+						                            param->getCurrentIndexValue(), modelStackWithParam)
+						                            + kKnobPosOffset,
+						                        0, 128);
+						int32_t position = 0;
+						bool found = false;
+						for (int32_t distance = 0; distance <= 128 && !found; distance++) {
+							for (int32_t sign = 1; sign >= -1; sign -= 2) {
+								int32_t tryKnobPos128 = targetKnobPos128 + (distance * sign);
+								if (tryKnobPos128 < 0 || tryKnobPos128 > 128) {
+									continue;
+								}
+								int32_t tryValue = modelStackWithParam->paramCollection->knobPosToParamValue(
+								    tryKnobPos128 - kKnobPosOffset, modelStackWithParam);
+								bool occupied = false;
+								for (int32_t i = 0; i < numNodes; i++) {
+									if (landscape->nodes[i].position == tryValue) {
+										occupied = true;
+										break;
+									}
+								}
+								if (!occupied) {
+									position = tryValue;
+									found = true;
+									break;
+								}
+								if (distance == 0) {
+									break;
+								}
+							}
+						}
+						if (!found) {
+							return ActionResult::DEALT_WITH;
+						}
+						Action* action =
+						    actionLogger.getNewAction(ActionType::LANDSCAPE_CHANGE, ActionAddition::NOT_ALLOWED);
+						addLandscapeChangeConsequence(action, modelStackWithParam);
+						int32_t slot = 0;
+						Error error = param->saveOutputAsLandscapeNode(modelStackWithParam, position, &slot);
+						if (error != Error::NONE) {
+							display->displayError(error);
+							return ActionResult::DEALT_WITH;
+						}
+						landscapeLaneView = slot;
+						char popupBuffer[20];
+						int32_t positionKnobPos =
+						    modelStackWithParam->paramCollection->paramValueToKnobPos(position, modelStackWithParam);
+						snprintf(popupBuffer, sizeof(popupBuffer), "%s @ %d",
+						         l10n::get(l10n::String::STRING_FOR_LANDSCAPE_CONTOUR),
+						         ((positionKnobPos + kKnobPosOffset) * 50 + 64) / 128);
+						display->displayPopup(popupBuffer);
+					}
+					// (LOAD on the index pad: no-op — the inverse-solve op was retired along
+					// with pinned rails; without full-range coverage it loses solvability.)
+					else {
+						landscapeLaneView = kLandscapeViewValue;
+						landscapeReposPadHeld = true; // Hold the index pad + knob to reposition the index.
+					}
+				}
+				// Output pad (second from top).
+				else if (y == kDisplayHeight - 2 && landscape) {
+					if (Buttons::isShiftButtonPressed() && !saveHeld && !loadHeld) {
+						// Shift+output: toggle the output over/underlay in the other views.
+						landscapeOverlayEnabled = !landscapeOverlayEnabled;
+						display->displayPopup(l10n::get(landscapeOverlayEnabled
+						                                    ? l10n::String::STRING_FOR_LANDSCAPE_OVERLAY_ON
+						                                    : l10n::String::STRING_FOR_LANDSCAPE_OVERLAY_OFF));
+					}
+					else if (!saveHeld && !loadHeld) {
+						landscapeLaneView = kLandscapeViewOutput;
+					}
+					// SAVE/LOAD on output: no-ops — it's already what's playing.
+				}
+				// Saved-position slots (stacked from the bottom).
+				else if (y < numNodes && y < kDisplayHeight - 2) {
+					if (saveHeld && Buttons::isShiftButtonPressed()) { // Delete this save.
+						Action* action =
+						    actionLogger.getNewAction(ActionType::LANDSCAPE_CHANGE, ActionAddition::NOT_ALLOWED);
+						addLandscapeChangeConsequence(action, modelStackWithParam);
+						Error error = param->deleteLandscapeNode(modelStackWithParam, y);
+						if (error != Error::NONE) {
+							display->displayError(error);
+							return ActionResult::DEALT_WITH;
+						}
+						if (landscapeLaneView >= (landscape ? landscape->numNodes : 0)) {
+							landscapeLaneView = kLandscapeViewValue;
+						}
+						display->displayPopup(l10n::get(l10n::String::STRING_FOR_LANDSCAPE_CONTOUR_DELETED));
+					}
+					else if (saveHeld) { // Overwrite this save with the output.
+						Action* action =
+						    actionLogger.getNewAction(ActionType::LANDSCAPE_CHANGE, ActionAddition::NOT_ALLOWED);
+						addLandscapeChangeConsequence(action, modelStackWithParam);
+						Error error = param->overwriteLandscapeNodeWithOutput(modelStackWithParam, y);
+						if (error != Error::NONE) {
+							display->displayError(error);
+							return ActionResult::DEALT_WITH;
+						}
+						landscapeLaneView = y;
+						display->displayPopup("OVERWRITTEN");
+					}
+					else if (loadHeld) { // Recall this save.
+						// Playing: arm for the next loop boundary (re-tap disarms) — like
+						// launching a clip. Stopped: instant. Instant-while-playing lives on
+						// the map (LOAD+map-tap). Armed recalls aren't undoable (performance).
+						if (playbackHandler.isEitherClockActive()) {
+							if (landscape->pendingRecallSlot == y) {
+								landscape->pendingRecallSlot = -1;
+								display->displayPopup("RECALL OFF");
+							}
+							else {
+								landscape->pendingRecallSlot = y;
+								landscapeLaneView = y; // Arming also selects, same as instant recall.
+								// Ensure the engine keeps ticking this param so the wrap fires.
+								modelStackWithParam->paramCollection->notifyParamModifiedInSomeWay(
+								    modelStackWithParam, param->getCurrentValue(), true, param->isAutomated(), true);
+								display->displayPopup("ARMED");
+							}
+						}
+						else {
+							Action* action =
+							    actionLogger.getNewAction(ActionType::LANDSCAPE_CHANGE, ActionAddition::NOT_ALLOWED);
+							addLandscapeChangeConsequence(action, modelStackWithParam);
+							param->parkIndexAtLandscapeNode(modelStackWithParam, y);
+							landscapeLaneView = y;
+							display->displayPopup(l10n::get(l10n::String::STRING_FOR_LANDSCAPE_LOADED));
+						}
+					}
+					else {
+						landscapeLaneView = y;
+						landscapeReposPadHeld = true; // Hold this contour's pad + knob to reposition it.
+					}
+				}
+				// Gap pads: nothing (already defused).
+				else {
+					return ActionResult::DEALT_WITH;
+				}
+				renderDisplay();
+				uiNeedsRendering(&automationView);
+				return ActionResult::DEALT_WITH;
+			}
+
+			// ---- RIGHT column: knob-travel map ----
+
+			// SAVE+tap: save the output AT this row (centre of its knob range, nudged free).
+			if (saveHeld) {
+				if (landscape && numNodes >= ParamLandscape::kMaxInteriorNodes) {
+					display->displayPopup(l10n::get(l10n::String::STRING_FOR_LANDSCAPE_MAX_CONTOURS));
+					return ActionResult::DEALT_WITH;
+				}
+				int32_t targetKnobPos128 =
+				    std::clamp<int32_t>(y * 129 / kDisplayHeight + (129 / (kDisplayHeight * 2)), 1, 127);
+				int32_t position = 0;
+				bool found = false;
+				for (int32_t distance = 0; distance <= 127 && !found; distance++) {
+					for (int32_t sign = 1; sign >= -1; sign -= 2) {
+						int32_t tryKnobPos128 = targetKnobPos128 + (distance * sign);
+						if (tryKnobPos128 < 1 || tryKnobPos128 > 127) {
+							continue;
+						}
+						int32_t tryValue = modelStackWithParam->paramCollection->knobPosToParamValue(
+						    tryKnobPos128 - kKnobPosOffset, modelStackWithParam);
+						bool occupied = false;
+						for (int32_t i = 0; i < numNodes; i++) {
+							if (landscape->nodes[i].position == tryValue) {
+								occupied = true;
+								break;
+							}
+						}
+						if (!occupied) {
+							position = tryValue;
+							found = true;
+							break;
+						}
+						if (distance == 0) {
+							break;
+						}
+					}
+				}
+				if (!found) {
+					return ActionResult::DEALT_WITH;
+				}
+				Action* action = actionLogger.getNewAction(ActionType::LANDSCAPE_CHANGE, ActionAddition::NOT_ALLOWED);
+				addLandscapeChangeConsequence(action, modelStackWithParam);
+				int32_t slot = 0;
+				Error error = param->saveOutputAsLandscapeNode(modelStackWithParam, position, &slot);
+				if (error != Error::NONE) {
+					display->displayError(error);
+					return ActionResult::DEALT_WITH;
+				}
+				if (landscapeLaneView >= 0) {
+					landscapeLaneView = slot;
+				}
+				char popupBuffer[20];
+				int32_t positionKnobPos =
+				    modelStackWithParam->paramCollection->paramValueToKnobPos(position, modelStackWithParam);
+				snprintf(popupBuffer, sizeof(popupBuffer), "%s @ %d",
+				         l10n::get(l10n::String::STRING_FOR_LANDSCAPE_CONTOUR),
+				         ((positionKnobPos + kKnobPosOffset) * 50 + 64) / 128);
+				display->displayPopup(popupBuffer);
+				renderDisplay();
+				uiNeedsRendering(&automationView);
+				return ActionResult::DEALT_WITH;
+			}
+
+			// LOAD+tap: park the knob. First tap on a row = row-centre; repeated taps cycle
+			// onto each save in the row (ascending), then wrap to row-centre.
+			if (loadHeld) {
+				if (y != loadMapCycleRow) {
+					loadMapCycleRow = y;
+					loadMapCycleStep = 0;
+				}
+				// Saves whose markers land on this row, ascending by slot (= position) order.
+				int32_t matches[ParamLandscape::kMaxInteriorNodes];
+				int32_t numMatches = 0;
+				for (int32_t i = 0; i < numNodes; i++) {
+					int32_t positionKnobPos = modelStackWithParam->paramCollection->paramValueToKnobPos(
+					                              landscape->nodes[i].position, modelStackWithParam)
+					                          + kKnobPosOffset;
+					int32_t markerRow =
+					    std::clamp<int32_t>(positionKnobPos * kDisplayHeight / 129, 0, kDisplayHeight - 1);
+					if (markerRow == y) {
+						matches[numMatches++] = i;
+					}
+				}
+				Action* action = actionLogger.getNewAction(ActionType::LANDSCAPE_CHANGE, ActionAddition::NOT_ALLOWED);
+				addLandscapeChangeConsequence(action, modelStackWithParam);
+				if (numMatches) {
+					// Rows with saves: cycle straight through them (lowest first, wrapping) —
+					// no row-centre stop (James's revision after use).
+					int32_t step = loadMapCycleStep % numMatches;
+					loadMapCycleStep = step + 1;
+					int32_t slot = matches[step];
+					param->parkIndexAtLandscapeNode(modelStackWithParam, slot);
+					landscapeLaneView = slot;
+					display->displayPopup(l10n::get(l10n::String::STRING_FOR_LANDSCAPE_LOADED));
+				}
+				else { // Empty row: park at its centre (the performance scrub-jump).
+					int32_t parkKnobPos128 =
+					    std::clamp<int32_t>(y * 129 / kDisplayHeight + (129 / (kDisplayHeight * 2)), 1, 127);
+					int32_t parkValue = modelStackWithParam->paramCollection->knobPosToParamValue(
+					    parkKnobPos128 - kKnobPosOffset, modelStackWithParam);
+					param->parkIndexAtPosition(modelStackWithParam, parkValue);
+					char popupBuffer[20];
+					snprintf(popupBuffer, sizeof(popupBuffer), "%s @ %d",
+					         l10n::get(l10n::String::STRING_FOR_LANDSCAPE_KNOB), (parkKnobPos128 * 50 + 64) / 128);
+					display->displayPopup(popupBuffer);
+				}
+				renderDisplay();
+				uiNeedsRendering(&automationView);
+				return ActionResult::DEALT_WITH;
+			}
+
+			// Plain map tap: cycle the view through every target whose marker lands on this row.
+			// The live index marker (if it's on this row) comes first, then the co-located saved
+			// contours (lowest position first); repeated taps cycle, wrapping. Row formulas match
+			// the sidebar renderer so the tappable targets are exactly the visible markers.
+			{
+				int32_t targets[1 + ParamLandscape::kMaxInteriorNodes];
+				int32_t numTargets = 0;
+				if (landscape) {
+					int32_t indexKnobPos = modelStackWithParam->paramCollection->paramValueToKnobPos(
+					                           param->getCurrentIndexValue(), modelStackWithParam)
+					                       + kKnobPosOffset;
+					int32_t indexRow = std::clamp<int32_t>(indexKnobPos * kDisplayHeight / 129, 0, kDisplayHeight - 1);
+					if (indexRow == y) {
+						targets[numTargets++] = kLandscapeViewValue; // the index leads the cycle
+					}
+				}
+				for (int32_t i = 0; i < numNodes; i++) {
+					int32_t positionKnobPos = modelStackWithParam->paramCollection->paramValueToKnobPos(
+					                              landscape->nodes[i].position, modelStackWithParam)
+					                          + kKnobPosOffset;
+					int32_t markerRow =
+					    std::clamp<int32_t>(positionKnobPos * kDisplayHeight / 129, 0, kDisplayHeight - 1);
+					if (markerRow == y) {
+						targets[numTargets++] = i;
+					}
+				}
+				if (numTargets) {
+					int32_t pick = targets[0];
+					for (int32_t t = 0; t < numTargets; t++) {
+						if (targets[t] == landscapeLaneView) {
+							pick = targets[(t + 1) % numTargets];
+							break;
+						}
+					}
+					landscapeLaneView = pick;
+					renderDisplay();
+					uiNeedsRendering(&automationView);
+				}
+			}
+			return ActionResult::DEALT_WITH;
+		}
 	}
 
 	Output* output = clip->output;
@@ -2438,7 +2964,44 @@ void AutomationView::modEncoderAction(int32_t whichModEncoder, int32_t offset) {
 	else {
 		modelStackWithTimelineCounter = currentSong->setupModelStackWithCurrentClip(modelStackMemory);
 		Clip* clip = getCurrentClip();
-		modelStackWithParam = getModelStackWithParamForClip(modelStackWithTimelineCounter, clip);
+		modelStackWithParam = getModelStackWithParamForClipRaw(modelStackWithTimelineCounter, clip);
+
+		// Transformation space knob roles. With NO slot pad held: LEFT morphs the index (audible),
+		// RIGHT edits the viewed contour's values. While a left-column slot pad is HELD, both knobs
+		// reposition that slot's contour instead: LEFT = neutral (output preserved), RIGHT =
+		// non-neutral (Option A shape edit). The target is the held contour (= the viewed lane,
+		// selected when the pad was pressed), so it tracks that contour through non-neutral swaps.
+		bool landscapeContext = inAutomationEditor() && !isUIModeActive(UI_MODE_NOTES_PRESSED) && !padSelectionOn
+		                        && modelStackWithParam && modelStackWithParam->autoParam
+		                        && modelStackWithParam->autoParam->landscape;
+		if (landscapeContext && landscapeReposPadHeld) {
+			bool savedContourViewed = getLandscapeView(modelStackWithParam->autoParam) >= 0;
+			if (whichModEncoder == 0) { // LEFT = neutral reposition.
+				if (savedContourViewed) {
+					neutralNodeDrag(modelStackWithParam, offset);
+				}
+				else {
+					neutralIndexDrag(modelStackWithParam, offset);
+				}
+				return;
+			}
+			// whichModEncoder == 1: RIGHT = non-neutral reposition.
+			if (savedContourViewed) {
+				adjustLandscapeNodePosition(modelStackWithParam, offset);
+				return;
+			}
+			// Index slot held + RIGHT: non-neutral index move == plain morph; fall through with the
+			// RAW (index) stack (no lane redirect).
+		}
+		else if (landscapeContext && whichModEncoder == 0) {
+			// Plain LEFT: morph the index — fall through with the RAW (index) stack, no redirect.
+		}
+		else {
+			// Plain RIGHT in a landscape: edit the viewed contour's lane (redirect the stack to it).
+			// Also the non-landscape path: a no-op without a landscape, or the held-pad value-edit
+			// redirect when a landscape is present but we're in pad-selection / notes-pressed mode.
+			applyLandscapeLaneView(modelStackWithParam);
+		}
 	}
 	int32_t effectiveLength = getEffectiveLength(modelStackWithTimelineCounter);
 
@@ -2530,8 +3093,12 @@ void AutomationView::modEncoderButtonAction(uint8_t whichModEncoder, bool on) {
 		}
 	}
 
-	// delete automation of current parameter selected
-	else if (Buttons::isShiftButtonPressed() && inAutomationEditor()) {
+	// delete automation of current parameter selected (the *viewed lane* when a transformation
+	// space is active; in the OUTPUT display this is the index lane, which the right knob
+	// performs on)
+	// (on-gated: this branch historically fired on BOTH press and release — idempotent and so
+	// invisible in stock, but it shredded the lane left in view after a consumed landscape op.)
+	else if (on && Buttons::isShiftButtonPressed() && inAutomationEditor()) {
 		if (modelStackWithParam && modelStackWithParam->autoParam) {
 			Action* action = actionLogger.getNewAction(ActionType::AUTOMATION_DELETE);
 			modelStackWithParam->autoParam->deleteAutomation(action, modelStackWithParam);
@@ -3083,9 +3650,9 @@ void AutomationView::initInterpolation() {
 
 // get's the modelstack for the parameters that are being edited
 // the model stack differs for SYNTH's, KIT's, MIDI, and Audio clip's
-ModelStackWithAutoParam* AutomationView::getModelStackWithParamForClip(ModelStackWithTimelineCounter* modelStack,
-                                                                       Clip* clip, int32_t paramID,
-                                                                       params::Kind paramKind) {
+ModelStackWithAutoParam* AutomationView::getModelStackWithParamForClipRaw(ModelStackWithTimelineCounter* modelStack,
+                                                                          Clip* clip, int32_t paramID,
+                                                                          params::Kind paramKind) {
 	ModelStackWithAutoParam* modelStackWithParam = nullptr;
 
 	if (paramID == kNoParamID) {
@@ -3101,6 +3668,427 @@ ModelStackWithAutoParam* AutomationView::getModelStackWithParamForClip(ModelStac
 	    clip->output->getModelStackWithParam(modelStack, clip, paramID, paramKind, getAffectEntire(), inSoundMenu);
 
 	return modelStackWithParam;
+}
+
+ModelStackWithAutoParam* AutomationView::getModelStackWithParamForClip(ModelStackWithTimelineCounter* modelStack,
+                                                                       Clip* clip, int32_t paramID,
+                                                                       params::Kind paramKind) {
+	// Only the editor's own (selected-param) resolutions follow the lane view; explicit-paramID
+	// callers (e.g. overview rendering of many params at once) always get the param itself.
+	bool forSelectedParam = (paramID == kNoParamID);
+
+	ModelStackWithAutoParam* modelStackWithParam =
+	    getModelStackWithParamForClipRaw(modelStack, clip, paramID, paramKind);
+
+	if (forSelectedParam) {
+		applyLandscapeLaneView(modelStackWithParam);
+	}
+
+	return modelStackWithParam;
+}
+
+int32_t AutomationView::getLandscapeView(AutoParam* parentParam) {
+	if (!parentParam || !parentParam->landscape) {
+		return kLandscapeViewValue;
+	}
+	if (landscapeLaneView >= parentParam->landscape->numNodes) {
+		return kLandscapeViewValue; // Stale node index (landscape shrank or param changed).
+	}
+	return landscapeLaneView;
+}
+
+void AutomationView::applyLandscapeLaneView(ModelStackWithAutoParam* modelStackWithParam) {
+	if (onArrangerView || !modelStackWithParam || !modelStackWithParam->autoParam) {
+		return;
+	}
+	AutoParam* parentParam = modelStackWithParam->autoParam;
+	int32_t view = getLandscapeView(parentParam);
+	if (view >= 0) {
+		modelStackWithParam->autoParam = &parentParam->landscape->nodes[view].value;
+	}
+}
+
+// Default position for a new save: the centre (display 25); if taken, subdivide toward
+// wherever the knob currently sits — 12.5 or 37.5, then their midpoints, and so on. Always
+// finds a free step with at most kMaxInteriorNodes saves.
+static int32_t defaultLandscapePosition(ModelStackWithAutoParam* modelStackWithParam) {
+	AutoParam* param = modelStackWithParam->autoParam;
+	int32_t indexKnobPos =
+	    modelStackWithParam->paramCollection->paramValueToKnobPos(param->getCurrentIndexValue(), modelStackWithParam);
+
+	int32_t low = -64;
+	int32_t high = 64;
+	for (int32_t depth = 0; depth < 7; depth++) {
+		int32_t middle = std::clamp<int32_t>((low + high) >> 1, -63, 63);
+		int32_t candidate = modelStackWithParam->paramCollection->knobPosToParamValue(middle, modelStackWithParam);
+		bool occupied = false;
+		if (param->landscape) {
+			for (int32_t i = 0; i < param->landscape->numNodes; i++) {
+				if (param->landscape->nodes[i].position == candidate) {
+					occupied = true;
+					break;
+				}
+			}
+		}
+		if (!occupied) {
+			return candidate;
+		}
+		if (indexKnobPos > middle) {
+			low = middle;
+		}
+		else {
+			high = middle;
+		}
+	}
+	return modelStackWithParam->paramCollection->knobPosToParamValue(0, modelStackWithParam); // Unreachable.
+}
+
+static void addLandscapeChangeConsequence(Action* action, ModelStackWithAutoParam const* modelStackWithParam) {
+	if (!action) {
+		return;
+	}
+	// Idempotent within an action: a coalesced drag (ALLOWED additions) calls this once per
+	// encoder pulse, but we only want the single pre-gesture before-state snapshotted. Discrete
+	// ops pass a fresh (NOT_ALLOWED) action, so this never trips for them.
+	if (action->containsConsequenceLandscapeChange(modelStackWithParam->paramCollection,
+	                                               modelStackWithParam->paramId)) {
+		return;
+	}
+	void* consequenceMemory = GeneralMemoryAllocator::get().allocLowSpeed(sizeof(ConsequenceLandscapeChange));
+	if (consequenceMemory) {
+		action->addConsequence(new (consequenceMemory) ConsequenceLandscapeChange(modelStackWithParam));
+	}
+}
+
+// Snapshot the landscape's before-state for an undoable knob-drag, just before the mutation.
+// ALLOWED coalesces a multi-pulse gesture into one Action; the snapshot is taken once (guarded
+// above). Call this only when committed to mutating, so a blocked (no-op) pulse doesn't create
+// an empty action (getNewAction also snapshots all clip states — not free).
+static void snapshotLandscapeForDrag(ModelStackWithAutoParam const* modelStackWithParam) {
+	addLandscapeChangeConsequence(actionLogger.getNewAction(ActionType::LANDSCAPE_CHANGE, ActionAddition::ALLOWED),
+	                              modelStackWithParam);
+}
+
+void AutomationView::toggleLandscapeTransformMode() {
+	landscapeTransformMode = !landscapeTransformMode;
+	if (!landscapeTransformMode) {
+		landscapeLaneView = kLandscapeViewValue;
+		loadMapCycleRow = -1;
+		landscapeReposPadHeld = false;
+	}
+	indicator_leds::setLedState(IndicatorLED::CROSS_SCREEN_EDIT, landscapeTransformMode);
+	renderDisplay();
+	uiNeedsRendering(&automationView);
+}
+
+void AutomationView::adjustLandscapeNodePosition(ModelStackWithAutoParam* modelStackWithParam, int32_t offset) {
+	AutoParam* param = modelStackWithParam->autoParam;
+	ParamLandscape* landscape = param->landscape;
+	int32_t nodeIndex = landscapeLaneView;
+	ParamLandscape::Node* node = &landscape->nodes[nodeIndex];
+
+	int32_t knobPos = modelStackWithParam->paramCollection->paramValueToKnobPos(node->position, modelStackWithParam);
+	// Rails are DEFAULTS, not pinned: a save moved to the absolute extreme (knob 0 or 50)
+	// replaces the implicit endpoint — its lane becomes the new start/end of the map.
+	int32_t direction = (offset > 0) ? 1 : -1;
+	int32_t newKnobPos = std::clamp<int32_t>(knobPos + offset, -64, 64);
+	int32_t newPosition = modelStackWithParam->paramCollection->knobPosToParamValue(newKnobPos, modelStackWithParam);
+
+	// Occupied steps are skipped over in the direction of travel (two saved positions can
+	// never share a knob step). If there's no free step left that way, the move stops.
+	while (true) {
+		bool occupied = false;
+		for (int32_t i = 0; i < landscape->numNodes; i++) {
+			if (i != nodeIndex && landscape->nodes[i].position == newPosition) {
+				occupied = true;
+				break;
+			}
+		}
+		if (!occupied) {
+			break;
+		}
+		newKnobPos += direction;
+		if (newKnobPos < -63 || newKnobPos > 63) {
+			return;
+		}
+		newPosition = modelStackWithParam->paramCollection->knobPosToParamValue(newKnobPos, modelStackWithParam);
+	}
+
+	int32_t oldOutput = param->getCurrentValue();
+
+	// Undo: snapshot the before-state now we're committed to moving (past the occupied-step
+	// guard above). Coalesces multi-pulse drags into one undo step.
+	snapshotLandscapeForDrag(modelStackWithParam);
+
+	// Dragging past a neighbour swaps the two saved positions' slots (the array stays sorted;
+	// the lanes keep their identities and travel with their positions).
+	while (nodeIndex < landscape->numNodes - 1 && newPosition > landscape->nodes[nodeIndex + 1].position) {
+		landscape->swapNodes(nodeIndex, nodeIndex + 1);
+		nodeIndex++;
+	}
+	while (nodeIndex > 0 && newPosition < landscape->nodes[nodeIndex - 1].position) {
+		landscape->swapNodes(nodeIndex, nodeIndex - 1);
+		nodeIndex--;
+	}
+	landscapeLaneView = nodeIndex; // The viewed lane follows the position being moved.
+	node = &landscape->nodes[nodeIndex];
+
+	// Option A (James): moving a save NEVER moves the index implicitly — repositioning is an
+	// edit, audible if the knob rides the segment; LOAD+slot re-parks explicitly afterwards.
+	// (The old per-pulse follow rule also "picked up" the knob when a node travelled across
+	// its parked position.)
+	node->position = newPosition;
+
+	if (param->getCurrentValue() != oldOutput) {
+		modelStackWithParam->paramCollection->notifyParamModifiedInSomeWay(modelStackWithParam, oldOutput, false, true,
+		                                                                   true);
+	}
+
+	// Display in the Deluge's native 0-50 param scale (internal resolution is finer).
+	char popupBuffer[20];
+	int32_t displayPosition = ((newKnobPos + kKnobPosOffset) * 50 + 64) / 128;
+	snprintf(popupBuffer, sizeof(popupBuffer), "%s @ %d", l10n::get(l10n::String::STRING_FOR_LANDSCAPE_CONTOUR),
+	         displayPosition);
+	display->displayPopup(popupBuffer);
+
+	uiNeedsRendering(&automationView);
+}
+
+void AutomationView::neutralIndexDrag(ModelStackWithAutoParam* modelStackWithParam, int32_t offset) {
+	AutoParam* param = modelStackWithParam->autoParam;
+	ParamLandscape* landscape = param->landscape;
+
+	if (param->isAutomated()) {
+		display->displayPopup(l10n::get(l10n::String::STRING_FOR_LANDSCAPE_INDEX_HAS_AUTOMATION));
+		return;
+	}
+
+	auto toKnobPos = [&](int32_t value) {
+		return modelStackWithParam->paramCollection->paramValueToKnobPos(value, modelStackWithParam);
+	};
+	auto toValue = [&](int32_t knobPos) {
+		return modelStackWithParam->paramCollection->knobPosToParamValue(std::clamp<int32_t>(knobPos, -64, 64),
+		                                                                 modelStackWithParam);
+	};
+
+	int32_t direction = (offset > 0) ? 1 : -1;
+	int32_t indexKnobPos = toKnobPos(param->getCurrentIndexValue());
+	int32_t newIndexKnobPos = indexKnobPos + direction;
+	if (newIndexKnobPos < -64 || newIndexKnobPos > 64) {
+		return;
+	}
+
+	int32_t oldOutput = param->getCurrentValue();
+
+	int32_t k = 0;
+	while (k < landscape->numNodes && param->getCurrentIndexValue() > landscape->nodes[k].position) {
+		k++;
+	}
+
+	// Parked exactly on a save: index and save translate together (output = its lane, always).
+	if (k < landscape->numNodes && param->getCurrentIndexValue() == landscape->nodes[k].position) {
+		int32_t newNodeKnobPos = toKnobPos(landscape->nodes[k].position) + direction;
+		bool blocked =
+		    newNodeKnobPos < -64 || newNodeKnobPos > 64
+		    || (k > 0 && newNodeKnobPos <= toKnobPos(landscape->nodes[k - 1].position))
+		    || (k < landscape->numNodes - 1 && newNodeKnobPos >= toKnobPos(landscape->nodes[k + 1].position));
+		if (blocked) {
+			display->displayPopup(l10n::get(l10n::String::STRING_FOR_LANDSCAPE_NEUTRAL_LIMIT));
+			return;
+		}
+		snapshotLandscapeForDrag(modelStackWithParam);
+		landscape->nodes[k].position = toValue(newNodeKnobPos);
+		param->currentValue = landscape->nodes[k].position;
+	}
+	else {
+		bool hasLeftNode = (k > 0);
+		bool hasRightNode = (k < landscape->numNodes);
+
+		if (hasLeftNode && hasRightNode) {
+			// Between two saves: translate both blend partners with the index — the blend
+			// fraction is preserved exactly.
+			int32_t newLeftKnobPos = toKnobPos(landscape->nodes[k - 1].position) + direction;
+			int32_t newRightKnobPos = toKnobPos(landscape->nodes[k].position) + direction;
+			bool blocked =
+			    newLeftKnobPos < -64 || newRightKnobPos > 64
+			    || (k >= 2 && newLeftKnobPos <= toKnobPos(landscape->nodes[k - 2].position))
+			    || (k + 1 < landscape->numNodes && newRightKnobPos >= toKnobPos(landscape->nodes[k + 1].position));
+			if (blocked) {
+				display->displayPopup(l10n::get(l10n::String::STRING_FOR_LANDSCAPE_NEUTRAL_LIMIT));
+				return;
+			}
+			snapshotLandscapeForDrag(modelStackWithParam);
+			landscape->nodes[k - 1].position = toValue(newLeftKnobPos);
+			landscape->nodes[k].position = toValue(newRightKnobPos);
+			param->currentValue = toValue(newIndexKnobPos);
+		}
+		else if (hasRightNode) {
+			// Bottom-rail segment: scale the save's distance from the rail to preserve the
+			// blend ratio (slight per-pulse rounding; the rail itself can't move).
+			int32_t denominator = indexKnobPos + 64;
+			if (denominator == 0) {
+				display->displayPopup(l10n::get(
+				    l10n::String::STRING_FOR_LANDSCAPE_NEUTRAL_LIMIT)); // On the rail: output is pinned there.
+				return;
+			}
+			int64_t scaled = (int64_t)(toKnobPos(landscape->nodes[0].position) + 64) * (newIndexKnobPos + 64);
+			int32_t newRightKnobPos = (int32_t)((scaled + (denominator >> 1)) / denominator) - 64;
+			if (newRightKnobPos <= newIndexKnobPos) {
+				newRightKnobPos = newIndexKnobPos + 1;
+			}
+			bool blocked = newRightKnobPos > 64
+			               || (landscape->numNodes > 1 && newRightKnobPos >= toKnobPos(landscape->nodes[1].position));
+			if (blocked) {
+				display->displayPopup(l10n::get(l10n::String::STRING_FOR_LANDSCAPE_NEUTRAL_LIMIT));
+				return;
+			}
+			snapshotLandscapeForDrag(modelStackWithParam);
+			landscape->nodes[0].position = toValue(newRightKnobPos);
+			param->currentValue = toValue(newIndexKnobPos);
+		}
+		else {
+			// Top-rail segment: mirror of the above.
+			int32_t denominator = 64 - indexKnobPos;
+			if (denominator == 0) {
+				display->displayPopup(l10n::get(l10n::String::STRING_FOR_LANDSCAPE_NEUTRAL_LIMIT));
+				return;
+			}
+			int32_t lastIndex = landscape->numNodes - 1;
+			int64_t scaled = (int64_t)(64 - toKnobPos(landscape->nodes[lastIndex].position)) * (64 - newIndexKnobPos);
+			int32_t newLeftKnobPos = 64 - (int32_t)((scaled + (denominator >> 1)) / denominator);
+			if (newLeftKnobPos >= newIndexKnobPos) {
+				newLeftKnobPos = newIndexKnobPos - 1;
+			}
+			bool blocked = newLeftKnobPos < -64
+			               || (lastIndex > 0 && newLeftKnobPos <= toKnobPos(landscape->nodes[lastIndex - 1].position));
+			if (blocked) {
+				display->displayPopup(l10n::get(l10n::String::STRING_FOR_LANDSCAPE_NEUTRAL_LIMIT));
+				return;
+			}
+			snapshotLandscapeForDrag(modelStackWithParam);
+			landscape->nodes[lastIndex].position = toValue(newLeftKnobPos);
+			param->currentValue = toValue(newIndexKnobPos);
+		}
+	}
+
+	modelStackWithParam->paramCollection->notifyParamModifiedInSomeWay(modelStackWithParam, oldOutput, false, false,
+	                                                                   false);
+
+	char popupBuffer[20];
+	snprintf(popupBuffer, sizeof(popupBuffer), "%s @ %d", l10n::get(l10n::String::STRING_FOR_LANDSCAPE_NEUTRAL),
+	         ((newIndexKnobPos + 64) * 50 + 64) / 128);
+	display->displayPopup(popupBuffer);
+	uiNeedsRendering(&automationView);
+}
+
+void AutomationView::neutralNodeDrag(ModelStackWithAutoParam* modelStackWithParam, int32_t offset) {
+	AutoParam* param = modelStackWithParam->autoParam;
+	ParamLandscape* landscape = param->landscape;
+	int32_t nodeIndex = getLandscapeView(param);
+	if (nodeIndex < 0 || nodeIndex >= landscape->numNodes) {
+		return;
+	}
+
+	auto toKnobPos = [&](int32_t value) {
+		return modelStackWithParam->paramCollection->paramValueToKnobPos(value, modelStackWithParam);
+	};
+	auto toValue = [&](int32_t knobPos) {
+		return modelStackWithParam->paramCollection->knobPosToParamValue(std::clamp<int32_t>(knobPos, -64, 64),
+		                                                                 modelStackWithParam);
+	};
+
+	int32_t direction = (offset > 0) ? 1 : -1;
+	int32_t nodeKnobPos = toKnobPos(landscape->nodes[nodeIndex].position);
+	int32_t newNodeKnobPos = nodeKnobPos + direction;
+
+	// Never swap — a swap would change which contours bracket the index, breaking neutrality. Clamp
+	// strictly between the neighbours' positions (the implicit rails at the ends).
+	int32_t leftEndpoint = (nodeIndex > 0) ? toKnobPos(landscape->nodes[nodeIndex - 1].position) : -64;
+	int32_t rightEndpoint =
+	    (nodeIndex < landscape->numNodes - 1) ? toKnobPos(landscape->nodes[nodeIndex + 1].position) : 64;
+	if (newNodeKnobPos <= leftEndpoint || newNodeKnobPos >= rightEndpoint) {
+		display->displayPopup(l10n::get(l10n::String::STRING_FOR_LANDSCAPE_NEUTRAL_LIMIT));
+		return;
+	}
+
+	// Does the index sit in one of this contour's two segments (so moving the contour changes the
+	// blend)? Classify in VALUE space against the actual positions — exact even if the index holds a
+	// sub-knob-step value (which a neutral drag leaves it at; see below). A contour the index doesn't
+	// touch can be repositioned freely — the output is already independent of it.
+	int32_t idxValue = param->getCurrentIndexValue();
+	int32_t nodePos = landscape->nodes[nodeIndex].position;
+	int32_t leftNeighbourPos = (nodeIndex > 0) ? landscape->nodes[nodeIndex - 1].position : toValue(-64);
+	int32_t rightNeighbourPos =
+	    (nodeIndex < landscape->numNodes - 1) ? landscape->nodes[nodeIndex + 1].position : toValue(64);
+	bool parkedOnNode = (idxValue == nodePos);
+	bool idxInLeftSeg = (idxValue > leftNeighbourPos && idxValue < nodePos);   // contour = right bracket
+	bool idxInRightSeg = (idxValue > nodePos && idxValue < rightNeighbourPos); // contour = left bracket
+	bool ridesIndex = parkedOnNode || idxInLeftSeg || idxInRightSeg;
+
+	// Riding the index writes the index value; refuse if it's automated (same guard the index
+	// neutral-drag uses). A contour the index doesn't touch can move even while automated.
+	if (ridesIndex && param->isAutomated()) {
+		display->displayPopup(l10n::get(l10n::String::STRING_FOR_LANDSCAPE_INDEX_HAS_AUTOMATION));
+		return;
+	}
+
+	int32_t oldOutput = param->getCurrentValue();
+	int32_t newNodePos = toValue(newNodeKnobPos);
+
+	// Hold the blend exactly. The blend is piecewise-linear in VALUE space, so to keep the output
+	// constant the index must hold its fractional position within the (moving) bracket. We solve that
+	// position at full int32 resolution — NOT snapped to the coarse 128-step knob grid (that snapping
+	// is what audibly shifted the output as the bracket gap shrank). The fraction is held in Q30, so
+	// the residual is ~2^-30 of the segment, far below the DAC's resolution; the on-screen 0-50
+	// readout just rounds it. The index never collapses onto a bracket, so the only real limit is the
+	// no-swap clamp above; the strict-interior checks below are a degenerate-case backstop.
+	constexpr int32_t kFracShift = 30;
+	int32_t newIdxValue = idxValue;
+	if (parkedOnNode) {
+		newIdxValue = newNodePos; // Index and contour translate together (output = the contour's value).
+	}
+	else if (idxInLeftSeg) {
+		// f = (idx - leftNeighbour)/(node - leftNeighbour), held as the right bracket (node) moves.
+		int64_t fFixed = (((int64_t)idxValue - leftNeighbourPos) << kFracShift) / ((int64_t)nodePos - leftNeighbourPos);
+		int64_t offset = (fFixed * ((int64_t)newNodePos - leftNeighbourPos) + (1 << (kFracShift - 1))) >> kFracShift;
+		newIdxValue = (int32_t)((int64_t)leftNeighbourPos + offset);
+		if (newIdxValue <= leftNeighbourPos || newIdxValue >= newNodePos) {
+			display->displayPopup(l10n::get(l10n::String::STRING_FOR_LANDSCAPE_NEUTRAL_LIMIT));
+			return;
+		}
+	}
+	else if (idxInRightSeg) {
+		// f = (rightNeighbour - idx)/(rightNeighbour - node), held as the left bracket (node) moves.
+		int64_t fFixed =
+		    (((int64_t)rightNeighbourPos - idxValue) << kFracShift) / ((int64_t)rightNeighbourPos - nodePos);
+		int64_t offset = (fFixed * ((int64_t)rightNeighbourPos - newNodePos) + (1 << (kFracShift - 1))) >> kFracShift;
+		newIdxValue = (int32_t)((int64_t)rightNeighbourPos - offset);
+		if (newIdxValue <= newNodePos || newIdxValue >= rightNeighbourPos) {
+			display->displayPopup(l10n::get(l10n::String::STRING_FOR_LANDSCAPE_NEUTRAL_LIMIT));
+			return;
+		}
+	}
+
+	// Undo: snapshot now we're committed (past the neutrality-limit guard). Coalesces the drag.
+	snapshotLandscapeForDrag(modelStackWithParam);
+
+	landscape->nodes[nodeIndex].position = newNodePos;
+	if (ridesIndex) {
+		param->currentValue = newIdxValue;
+	}
+
+	// Always notify (mirrors neutralIndexDrag): refreshes the param-LPF and the index MIDI feedback
+	// even when the output is held constant, since the index value itself moved.
+	modelStackWithParam->paramCollection->notifyParamModifiedInSomeWay(modelStackWithParam, oldOutput, false, false,
+	                                                                   false);
+
+	// Display the contour's new position in the native 0-50 scale.
+	char popupBuffer[20];
+	int32_t displayPosition = ((newNodeKnobPos + kKnobPosOffset) * 50 + 64) / 128;
+	snprintf(popupBuffer, sizeof(popupBuffer), "%s @ %d", l10n::get(l10n::String::STRING_FOR_LANDSCAPE_NEUTRAL),
+	         displayPosition);
+	display->displayPopup(popupBuffer);
+	uiNeedsRendering(&automationView);
 }
 
 // this function obtains a parameters value and converts it to a knobPos

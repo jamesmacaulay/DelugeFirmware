@@ -32,6 +32,7 @@
 #include "model/settings/runtime_feature_settings.h"
 #include "model/song/song.h"
 #include "modulation/automation/copied_param_automation.h"
+#include "modulation/automation/param_landscape.h"
 #include "modulation/params/param_collection.h"
 #include "modulation/params/param_node.h"
 #include "playback/mode/playback_mode.h"
@@ -39,6 +40,7 @@
 #include "processing/engines/audio_engine.h"
 #include "storage/storage_manager.h"
 #include "util/functions.h"
+#include <algorithm>
 #include <math.h>
 
 #define SAMPLES_TO_CLEAR_AFTER_RECORD 8820          // 200ms
@@ -57,8 +59,641 @@ AutoParam::AutoParam() {
 	renewedOverridingAtTime = 0;
 }
 
+AutoParam::~AutoParam() {
+	freeLandscape();
+}
+
 void AutoParam::init() {
 	nodes.init();
+}
+
+int32_t AutoParam::landscapeOutput() {
+	return landscape->transform(currentValue);
+}
+
+void AutoParam::freeLandscape() {
+	if (landscape) {
+		landscape->~ParamLandscape();
+		delugeDealloc(landscape);
+		landscape = nullptr;
+	}
+}
+
+ParamLandscape* AutoParam::getOrCreateLandscape() {
+	if (!landscape) {
+		void* landscapeMemory = GeneralMemoryAllocator::get().allocLowSpeed(sizeof(ParamLandscape));
+		if (landscapeMemory) {
+			landscape = new (landscapeMemory) ParamLandscape();
+		}
+	}
+	return landscape;
+}
+
+int32_t AutoParam::landscapeOutputAtPos(uint32_t pos, ModelStackWithAutoParam const* modelStack) {
+	int32_t index = isAutomated() ? getValueAtPos(pos, modelStack) : currentValue;
+	return landscape ? landscape->transformAtPos(index, pos, modelStack) : index;
+}
+
+Error AutoParam::insertLandscapeNodeSlot(int32_t nodePosition, int32_t* slotOut) {
+	if (!getOrCreateLandscape()) {
+		return Error::INSUFFICIENT_RAM;
+	}
+	if (landscape->numNodes >= ParamLandscape::kMaxInteriorNodes) {
+		return Error::OUT_OF_BUFFER_SPACE;
+	}
+
+	// Sorted insertion; the position must be free.
+	int32_t slot = 0;
+	while (slot < landscape->numNodes && landscape->nodes[slot].position < nodePosition) {
+		slot++;
+	}
+	if (slot < landscape->numNodes && landscape->nodes[slot].position == nodePosition) {
+		return Error::UNSPECIFIED;
+	}
+
+	// Shift higher nodes up one slot. Lane node-memory ownership moves via state swaps; the
+	// slot vacated at the bottom of the chain ends up holding the (pristine) top slot's empty
+	// lane state.
+	for (int32_t i = landscape->numNodes; i > slot; i--) {
+		ParamLandscape::Node& destination = landscape->nodes[i];
+		ParamLandscape::Node& source = landscape->nodes[i - 1];
+		destination.position = source.position;
+		destination.value.nodes.swapStateWith(&source.value.nodes);
+		destination.value.currentValue = source.value.currentValue;
+		destination.value.valueIncrementPerHalfTick = source.value.valueIncrementPerHalfTick;
+		destination.value.renewedOverridingAtTime = 0;
+	}
+
+	landscape->nodes[slot].position = nodePosition;
+	*slotOut = slot;
+	return Error::NONE;
+}
+
+Error AutoParam::moveAutomationIntoLandscapeNode(ModelStackWithAutoParam const* modelStack, int32_t nodePosition,
+                                                 int32_t* slotOut) {
+	bool automatedBefore = isAutomated();
+	int32_t outputBefore = getCurrentValue();
+
+	int32_t slot;
+	Error error = insertLandscapeNodeSlot(nodePosition, &slot);
+	if (error != Error::NONE) {
+		return error;
+	}
+
+	ParamLandscape::Node* node = &landscape->nodes[slot];
+
+	AutoParam& lane = node->value;
+	lane.deleteAutomationBasicForSetup(); // Defensive; should already be empty.
+	if (automatedBefore) {
+		// Move (not copy) the index automation in: nodes, moving value and any in-flight
+		// interpolation. The swap leaves this->nodes holding the lane's empty state.
+		lane.nodes.swapStateWith(&nodes);
+		lane.currentValue = currentValue;
+		lane.valueIncrementPerHalfTick = valueIncrementPerHalfTick;
+	}
+	else {
+		// No automation to move: pin the current output here, so inserting the node doesn't
+		// change the map at this position (playback-neutral) and the lane is ready to sculpt.
+		lane.currentValue = outputBefore;
+		lane.valueIncrementPerHalfTick = 0;
+	}
+	lane.renewedOverridingAtTime = 0;
+
+	landscape->numNodes++;
+
+	// Park the index on the new node: T(nodePosition) = the new lane.
+	currentValue = nodePosition;
+	valueIncrementPerHalfTick = 0;
+	renewedOverridingAtTime = 0;
+
+	if (slotOut) {
+		*slotOut = slot;
+	}
+
+	// Index lane is no longer automated, but needsTicking() keeps the summary bit alive.
+	modelStack->paramCollection->notifyParamModifiedInSomeWay(modelStack, outputBefore, true, automatedBefore,
+	                                                          isAutomated());
+
+	return Error::NONE;
+}
+
+Error AutoParam::bakeOutputNodeList(ParamNodeVector* dest, ModelStackWithAutoParam const* modelStack) {
+	bool automatedNow = isAutomated();
+	ParamNodeVector& bakedNodes = *dest;
+	bool automatedBefore = automatedNow;
+	bool baked = false;
+
+	// Exact path: index parked (unautomated) inside a sliding segment — the output's true
+	// breakpoints are the MORPHED pair positions, which the union-of-real-nodes sampling below
+	// would miss entirely (it was audibly lossy). Materialise them directly: a lossless
+	// capture, and parking exactly on a saved position duplicates its lane exactly.
+	if (landscape && !automatedBefore) {
+		for (int32_t i = 0; i < landscape->numNodes; i++) {
+			if (currentValue <= landscape->nodes[i].position) {
+				if (landscape->segmentSlides(i - 1)) {
+					int32_t leftPos = landscape->nodes[i - 1].position;
+					uint32_t span = (uint32_t)((int64_t)landscape->nodes[i].position - (int64_t)leftPos);
+					uint32_t morphFrac =
+					    (uint32_t)((((uint64_t)(uint32_t)((int64_t)currentValue - (int64_t)leftPos)) << 31) / span);
+					Error error = landscape->buildSlideNodeList(i - 1, morphFrac, &bakedNodes);
+					if (error != Error::NONE) {
+						return error;
+					}
+					baked = true;
+				}
+				break;
+			}
+		}
+	}
+
+	// General path: bake at the union of event positions (exact for blend segments with a
+	// parked index; bounded ramp-x-ramp sliver when the index is automated too).
+	int32_t numPositions = nodes.getNumElements();
+	if (landscape) {
+		for (int32_t i = 0; i < landscape->numNodes; i++) {
+			numPositions += landscape->nodes[i].value.nodes.getNumElements();
+		}
+	}
+
+	if (!baked && numPositions) {
+		int32_t* positions = (int32_t*)delugeAlloc(numPositions * sizeof(int32_t));
+		if (!positions) {
+			return Error::INSUFFICIENT_RAM;
+		}
+		int32_t numCollected = 0;
+		for (int32_t n = 0; n < nodes.getNumElements(); n++) {
+			positions[numCollected++] = nodes.getElement(n)->pos;
+		}
+		if (landscape) {
+			for (int32_t i = 0; i < landscape->numNodes; i++) {
+				ParamNodeVector& laneNodes = landscape->nodes[i].value.nodes;
+				for (int32_t n = 0; n < laneNodes.getNumElements(); n++) {
+					positions[numCollected++] = laneNodes.getElement(n)->pos;
+				}
+			}
+		}
+		std::sort(positions, positions + numCollected);
+		int32_t numUnique = 0;
+		for (int32_t n = 0; n < numCollected; n++) {
+			if (n == 0 || positions[n] != positions[numUnique - 1]) {
+				positions[numUnique++] = positions[n];
+			}
+		}
+
+		Error error = bakedNodes.insertAtIndex(0, numUnique);
+		if (error != Error::NONE) {
+			delugeDealloc(positions);
+			return error;
+		}
+		for (int32_t n = 0; n < numUnique; n++) {
+			ParamNode* bakedNode = (ParamNode*)bakedNodes.getElementAddress(n);
+			bakedNode->pos = positions[n];
+			bakedNode->value = landscapeOutputAtPos(positions[n], modelStack);
+			bakedNode->interpolated = true;
+		}
+		// Step preservation: a baked node is a step (non-interpolated) iff the true output
+		// actually HOLDS through the gap before it — probed at the gap's midpoint. Flags can't
+		// be taken from the index lane alone (after a save it's empty) nor copied blindly from
+		// lane nodes (a far lane's step needn't step the output); probing the output itself is
+		// exact for both blend and slide regions, and losing these flags was audibly smoothing
+		// re-saved step automation.
+		for (int32_t n = 1; n < numUnique; n++) {
+			ParamNode* previousNode = (ParamNode*)bakedNodes.getElementAddress(n - 1);
+			ParamNode* bakedNode = (ParamNode*)bakedNodes.getElementAddress(n);
+			if (bakedNode->value != previousNode->value && bakedNode->pos > previousNode->pos + 1) {
+				int32_t midpoint = previousNode->pos + ((bakedNode->pos - previousNode->pos) >> 1);
+				if (landscapeOutputAtPos(midpoint, modelStack) == previousNode->value) {
+					bakedNode->interpolated = false;
+				}
+			}
+		}
+		// The wrap segment (last node -> first node, through the loop point) carries its flag
+		// on the FIRST node — probe it cyclically too, or held-through-the-loop steps re-bake
+		// as a smooth ramp across the boundary (HW-found: audible at the loop seam).
+		if (numUnique > 1) {
+			ParamNode* lastNode = (ParamNode*)bakedNodes.getElementAddress(numUnique - 1);
+			ParamNode* firstNode = (ParamNode*)bakedNodes.getElementAddress(0);
+			int32_t effectiveLength = modelStack->getLoopLength();
+			if (firstNode->value != lastNode->value && effectiveLength > 0) {
+				int32_t wrapGap = firstNode->pos + effectiveLength - lastNode->pos;
+				if (wrapGap > 1) {
+					int32_t midpoint = lastNode->pos + (wrapGap >> 1);
+					if (midpoint >= effectiveLength) {
+						midpoint -= effectiveLength;
+					}
+					if (landscapeOutputAtPos(midpoint, modelStack) == lastNode->value) {
+						firstNode->interpolated = false;
+					}
+				}
+			}
+		}
+		delugeDealloc(positions);
+	}
+
+	return Error::NONE;
+}
+
+Error AutoParam::saveOutputAsLandscapeNode(ModelStackWithAutoParam const* modelStack, int32_t nodePosition,
+                                           int32_t* slotOut) {
+	bool automatedBefore = isAutomated();
+	int32_t outputBefore = getCurrentValue();
+
+	ParamNodeVector bakedNodes;
+	Error error = bakeOutputNodeList(&bakedNodes, modelStack);
+	if (error != Error::NONE) {
+		return error;
+	}
+
+	int32_t slot;
+	error = insertLandscapeNodeSlot(nodePosition, &slot);
+	if (error != Error::NONE) {
+		return error; // bakedNodes frees itself on scope exit.
+	}
+
+	AutoParam& lane = landscape->nodes[slot].value;
+	lane.deleteAutomationBasicForSetup();
+	lane.nodes.swapStateWith(&bakedNodes);
+	lane.currentValue = outputBefore;
+	lane.valueIncrementPerHalfTick = 0;
+	lane.renewedOverridingAtTime = 0;
+
+	landscape->numNodes++;
+
+	// Clear the index automation and park on the new node: T(position) = the captured curve =
+	// exactly what was playing. Playback-neutral.
+	deleteAutomationBasicForSetup();
+	currentValue = nodePosition;
+
+	if (slotOut) {
+		*slotOut = slot;
+	}
+
+	modelStack->paramCollection->notifyParamModifiedInSomeWay(modelStack, outputBefore, true, automatedBefore,
+	                                                          isAutomated());
+
+	return Error::NONE;
+}
+
+Error AutoParam::deleteLandscapeNode(ModelStackWithAutoParam const* modelStack, int32_t slot) {
+	if (!landscape || slot < 0 || slot >= landscape->numNodes) {
+		return Error::UNSPECIFIED;
+	}
+
+	bool automatedBefore = needsTicking();
+	int32_t oldOutput = getCurrentValue();
+
+	// Shift higher slots down over the deleted one (state swaps keep lane node-memory
+	// ownership sane); the deleted lane ends up in the vacated top slot, which we then clear.
+	for (int32_t i = slot; i < landscape->numNodes - 1; i++) {
+		landscape->swapNodes(i, i + 1);
+	}
+	landscape->nodes[landscape->numNodes - 1].value.deleteAutomationBasicForSetup();
+	landscape->numNodes--;
+
+	if (landscape->numNodes == 0) {
+		freeLandscape();
+	}
+
+	modelStack->paramCollection->notifyParamModifiedInSomeWay(modelStack, oldOutput, true, automatedBefore,
+	                                                          isAutomated());
+	return Error::NONE;
+}
+
+Error AutoParam::parkIndexAtLandscapeNode(ModelStackWithAutoParam const* modelStack, int32_t slot) {
+	if (!landscape || slot < 0 || slot >= landscape->numNodes) {
+		return Error::UNSPECIFIED;
+	}
+	parkIndexAtPosition(modelStack, landscape->nodes[slot].position);
+	return Error::NONE;
+}
+
+void AutoParam::parkIndexAtPosition(ModelStackWithAutoParam const* modelStack, int32_t newIndexValue) {
+	bool automatedBefore = isAutomated();
+	int32_t oldOutput = getCurrentValue();
+
+	deleteAutomationBasicForSetup();
+	currentValue = newIndexValue;
+
+	modelStack->paramCollection->notifyParamModifiedInSomeWay(modelStack, oldOutput, true, automatedBefore,
+	                                                          isAutomated());
+}
+
+Error AutoParam::overwriteLandscapeNodeWithOutput(ModelStackWithAutoParam const* modelStack, int32_t slot) {
+	if (!landscape || slot < 0 || slot >= landscape->numNodes) {
+		return Error::UNSPECIFIED;
+	}
+
+	bool automatedBefore = isAutomated();
+	int32_t outputBefore = getCurrentValue();
+
+	// Capture exactly as saveOutputAsLandscapeNode does: morphed breakpoints when parked in a
+	// sliding segment, union-of-events otherwise. (Bake BEFORE touching the target lane — it
+	// contributes to the output.)
+	ParamNodeVector bakedNodes;
+	Error error = bakeOutputNodeList(&bakedNodes, modelStack);
+	if (error != Error::NONE) {
+		return error;
+	}
+
+	AutoParam& lane = landscape->nodes[slot].value;
+	lane.deleteAutomationBasicForSetup();
+	lane.nodes.swapStateWith(&bakedNodes);
+	lane.currentValue = outputBefore;
+	lane.valueIncrementPerHalfTick = 0;
+	lane.renewedOverridingAtTime = 0;
+
+	deleteAutomationBasicForSetup();
+	currentValue = landscape->nodes[slot].position;
+
+	modelStack->paramCollection->notifyParamModifiedInSomeWay(modelStack, outputBefore, true, automatedBefore,
+	                                                          isAutomated());
+	return Error::NONE;
+}
+
+void AutoParam::deleteLandscape(ModelStackWithAutoParam const* modelStack) {
+	if (!landscape) {
+		return;
+	}
+
+	bool automatedBefore = needsTicking();
+	int32_t oldOutput = getCurrentValue();
+	freeLandscape();
+	modelStack->paramCollection->notifyParamModifiedInSomeWay(modelStack, oldOutput, true, automatedBefore,
+	                                                          isAutomated());
+}
+
+Error AutoParam::flattenLandscape(ModelStackWithAutoParam const* modelStack) {
+	if (!landscape) {
+		return Error::NONE;
+	}
+
+	int32_t oldOutput = getCurrentValue();
+
+	// Union of event positions across the index lane and all automated node lanes. Exact for
+	// every stretch where only one of the blended signals is ramping; simultaneous ramps leave
+	// a bounded quadratic sliver per segment (no midpoint insertion in v1).
+	int32_t numPositions = nodes.getNumElements();
+	for (int32_t i = 0; i < landscape->numNodes; i++) {
+		numPositions += landscape->nodes[i].value.nodes.getNumElements();
+	}
+
+	if (numPositions == 0) {
+		// Nothing automated anywhere: output is constant, so just collapse to it.
+		currentValue = oldOutput;
+		freeLandscape();
+		modelStack->paramCollection->notifyParamModifiedInSomeWay(modelStack, oldOutput, true, false, false);
+		return Error::NONE;
+	}
+
+	int32_t* positions = (int32_t*)delugeAlloc(numPositions * sizeof(int32_t));
+	if (!positions) {
+		return Error::INSUFFICIENT_RAM;
+	}
+
+	int32_t numCollected = 0;
+	for (int32_t n = 0; n < nodes.getNumElements(); n++) {
+		positions[numCollected++] = nodes.getElement(n)->pos;
+	}
+	for (int32_t i = 0; i < landscape->numNodes; i++) {
+		ParamNodeVector& laneNodes = landscape->nodes[i].value.nodes;
+		for (int32_t n = 0; n < laneNodes.getNumElements(); n++) {
+			positions[numCollected++] = laneNodes.getElement(n)->pos;
+		}
+	}
+
+	std::sort(positions, positions + numCollected);
+	int32_t numUnique = 0;
+	for (int32_t n = 0; n < numCollected; n++) {
+		if (n == 0 || positions[n] != positions[numUnique - 1]) {
+			positions[numUnique++] = positions[n];
+		}
+	}
+
+	ParamNodeVector bakedNodes;
+	Error error = bakedNodes.insertAtIndex(0, numUnique);
+	if (error != Error::NONE) {
+		delugeDealloc(positions);
+		return error;
+	}
+
+	for (int32_t n = 0; n < numUnique; n++) {
+		// Step (non-interpolated) index nodes must stay steps in the baked lane; everything
+		// else is a sample of a continuously-blended signal.
+		bool interpolated = true;
+		int32_t i = nodes.search(positions[n], GREATER_OR_EQUAL);
+		if (i < nodes.getNumElements()) {
+			ParamNode* indexNode = nodes.getElement(i);
+			if (indexNode->pos == positions[n] && !indexNode->interpolated) {
+				interpolated = false;
+			}
+		}
+
+		ParamNode* bakedNode = (ParamNode*)bakedNodes.getElementAddress(n);
+		bakedNode->pos = positions[n];
+		bakedNode->value = landscapeOutputAtPos(positions[n], modelStack);
+		bakedNode->interpolated = interpolated;
+	}
+
+	delugeDealloc(positions);
+
+	// Swap the baked lane in; bakedNodes (now holding the old index-lane memory) frees it when
+	// it goes out of scope.
+	nodes.swapStateWith(&bakedNodes);
+
+	freeLandscape();
+
+	currentValue = oldOutput;
+	valueIncrementPerHalfTick = 0;
+	renewedOverridingAtTime = 0;
+
+	modelStack->paramCollection->notifyParamModifiedInSomeWay(modelStack, oldOutput, true, true, true);
+
+	return Error::NONE;
+}
+
+void AutoParam::copyLandscapeOutput(int32_t startPos, int32_t endPos, CopiedParamAutomation* copiedParamAutomation,
+                                    bool isPatchCable, ModelStackWithAutoParam const* modelStack) {
+
+	copiedParamAutomation->width = endPos - startPos;
+
+	// Union of event positions within the window, plus an anchor at the window start (the
+	// clipboard format requires a node at relative pos 0).
+	int32_t maxPositions = 1 + nodes.getNumElements();
+	if (landscape) {
+		for (int32_t i = 0; i < landscape->numNodes; i++) {
+			maxPositions += landscape->nodes[i].value.nodes.getNumElements();
+		}
+	}
+
+	int32_t* positions = (int32_t*)delugeAlloc(maxPositions * sizeof(int32_t));
+	if (!positions) {
+		display->displayError(Error::INSUFFICIENT_RAM);
+		return;
+	}
+
+	int32_t numCollected = 0;
+	positions[numCollected++] = startPos;
+	for (int32_t n = 0; n < nodes.getNumElements(); n++) {
+		int32_t pos = nodes.getElement(n)->pos;
+		if (pos > startPos && pos < endPos) {
+			positions[numCollected++] = pos;
+		}
+	}
+	if (landscape) {
+		for (int32_t i = 0; i < landscape->numNodes; i++) {
+			ParamNodeVector& laneNodes = landscape->nodes[i].value.nodes;
+			for (int32_t n = 0; n < laneNodes.getNumElements(); n++) {
+				int32_t pos = laneNodes.getElement(n)->pos;
+				if (pos > startPos && pos < endPos) {
+					positions[numCollected++] = pos;
+				}
+			}
+		}
+	}
+
+	std::sort(positions, positions + numCollected);
+	int32_t numUnique = 0;
+	for (int32_t n = 0; n < numCollected; n++) {
+		if (n == 0 || positions[n] != positions[numUnique - 1]) {
+			positions[numUnique++] = positions[n];
+		}
+	}
+
+	if (copiedParamAutomation->nodes != nullptr) {
+		GeneralMemoryAllocator::get().dealloc(copiedParamAutomation->nodes);
+		copiedParamAutomation->nodes = nullptr;
+	}
+	copiedParamAutomation->numNodes = numUnique;
+	copiedParamAutomation->nodes =
+	    (ParamNode*)GeneralMemoryAllocator::get().allocLowSpeed(sizeof(ParamNode) * numUnique);
+	if (!copiedParamAutomation->nodes) {
+		copiedParamAutomation->numNodes = 0;
+		delugeDealloc(positions);
+		display->displayError(Error::INSUFFICIENT_RAM);
+		return;
+	}
+
+	for (int32_t n = 0; n < numUnique; n++) {
+		ParamNode* newNode = &copiedParamAutomation->nodes[n];
+		newNode->pos = positions[n] - startPos;
+		newNode->value = landscapeOutputAtPos(positions[n], modelStack);
+		newNode->interpolated = (n != 0); // Anchor matches copy()'s non-interpolated start node.
+		if (isPatchCable) {
+			newNode->value = lshiftAndSaturate<1>(newNode->value);
+		}
+	}
+
+	delugeDealloc(positions);
+}
+
+bool AutoParam::needsTicking() {
+	return isAutomated()
+	       || (landscape && (landscape->hasAnyAutomatedLanes() || landscape->pendingRecallSlot >= 0));
+}
+
+bool AutoParam::hasActiveInterpolation() {
+	if (valueIncrementPerHalfTick) {
+		return true;
+	}
+	if (landscape && landscape->slideOutputActive && landscape->slideIncrementPerHalfTick) {
+		return true;
+	}
+	if (landscape) {
+		for (int32_t i = 0; i < landscape->numNodes; i++) {
+			if (landscape->nodes[i].value.valueIncrementPerHalfTick) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+void AutoParam::stopAllInterpolation() {
+	valueIncrementPerHalfTick = 0;
+	if (landscape) {
+		landscape->slideOutputActive = false;
+		landscape->slideIncrementPerHalfTick = 0;
+	}
+	if (landscape) {
+		for (int32_t i = 0; i < landscape->numNodes; i++) {
+			landscape->nodes[i].value.valueIncrementPerHalfTick = 0;
+		}
+	}
+}
+
+int32_t AutoParam::processLandscapeLanesCurrentPos(ModelStackWithAutoParam const* modelStack, bool reversed,
+                                                   bool didPingpong, bool mayInterpolate, int32_t ticksTilNextEvent) {
+	if (!landscape) {
+		return ticksTilNextEvent;
+	}
+
+	int32_t oldOutput = getCurrentValue();
+	bool anyLaneMoved = false;
+
+	// Refresh the slide-morph playback context AFTER capturing the old output, so a sliding
+	// segment's time-driven movement registers as a change below.
+	int32_t previousPlayPos = landscape->lastPlayPos;
+	landscape->lastPlayPos = modelStack->getLastProcessedPos();
+	landscape->loopLength = modelStack->getLoopLength();
+	bool sliding = landscape->slidePossibleForIndex(currentValue);
+
+	// Quantised recall: fire when the playhead wraps the loop boundary.
+	if (landscape->pendingRecallSlot >= 0 && landscape->lastPlayPos < previousPlayPos) {
+		int32_t slot = landscape->pendingRecallSlot;
+		landscape->pendingRecallSlot = -1;
+		if (slot < landscape->numNodes) {
+			parkIndexAtPosition(modelStack, landscape->nodes[slot].position);
+			oldOutput = getCurrentValue(); // The park already notified; don't re-report it.
+			sliding = landscape->slidePossibleForIndex(currentValue);
+		}
+	}
+
+	for (int32_t i = 0; i < landscape->numNodes; i++) {
+		AutoParam& lane = landscape->nodes[i].value;
+		if (!lane.isAutomated()) {
+			continue;
+		}
+		int32_t laneValueBefore = lane.currentValue;
+		// Node lanes never carry overriding/recording state or landscapes of their own, so this
+		// only walks the plain advance-and-interpolate paths. Their internal notification is
+		// suppressed; we notify once below, in output space, on the parent's behalf.
+		int32_t laneTicks = lane.processCurrentPos(modelStack, reversed, didPingpong, mayInterpolate, false, false);
+		ticksTilNextEvent = std::min(ticksTilNextEvent, laneTicks);
+		anyLaneMoved = anyLaneMoved || (lane.currentValue != laneValueBefore);
+	}
+
+	// A sliding segment's output moves with the playhead even between lane events (its morphed
+	// breakpoints sit at times neither lane has a node at), so decline the sleep optimisation
+	// and re-evaluate every tick while one is active. The audible value rides the smoothing
+	// interpolator: each tick aims it at the fresh exact evaluation, and tickSamples ramps
+	// there — sample-smooth sweeps, and edit-time pairing reshapes become glides not clicks.
+	if (sliding) {
+		int32_t target = landscape->transformRaw(currentValue);
+		if (!landscape->slideOutputActive) {
+			landscape->slideOutputValue = target;
+			landscape->slideIncrementPerHalfTick = 0;
+			landscape->slideOutputActive = true;
+		}
+		else {
+			landscape->slideIncrementPerHalfTick = (target >> 1) - (landscape->slideOutputValue >> 1);
+		}
+		ticksTilNextEvent = std::min(ticksTilNextEvent, (int32_t)1);
+	}
+	else if (landscape->slideOutputActive) {
+		landscape->slideOutputActive = false;
+		landscape->slideIncrementPerHalfTick = 0;
+	}
+
+	// While a recall is armed we must be ticked every tick to catch the wrap promptly.
+	if (landscape->pendingRecallSlot >= 0) {
+		ticksTilNextEvent = std::min(ticksTilNextEvent, (int32_t)1);
+	}
+
+	if ((anyLaneMoved || sliding) && getCurrentValue() != oldOutput) {
+		modelStack->paramCollection->notifyParamModifiedInSomeWay(modelStack, oldOutput, false, true, true);
+	}
+
+	return ticksTilNextEvent;
 }
 
 void AutoParam::cloneFrom(AutoParam* otherParam, bool copyAutomation) {
@@ -69,6 +704,15 @@ void AutoParam::cloneFrom(AutoParam* otherParam, bool copyAutomation) {
 		nodes.init();
 	}
 	currentValue = otherParam->currentValue;
+
+	freeLandscape();
+	if (otherParam->landscape) {
+		void* landscapeMemory = GeneralMemoryAllocator::get().allocLowSpeed(sizeof(ParamLandscape));
+		if (landscapeMemory) {
+			landscape = new (landscapeMemory) ParamLandscape();
+			landscape->cloneFrom(otherParam->landscape, copyAutomation);
+		}
+	}
 
 	renewedOverridingAtTime = 0;
 }
@@ -84,7 +728,7 @@ void AutoParam::copyOverridingFrom(AutoParam* otherParam) {
 // This is mostly for "expression" params, which we frequently want to bump back to 0 - often when there is no
 // automation, or when playback is stopped.
 void AutoParam::setCurrentValueWithNoReversionOrRecording(ModelStackWithAutoParam const* modelStack, int32_t value) {
-	int32_t oldValue = currentValue;
+	int32_t oldValue = getCurrentValue(); // Output space — notification consumers compare against it.
 	currentValue = value;
 	bool automatedNow = isAutomated();
 	modelStack->paramCollection->notifyParamModifiedInSomeWay(modelStack, oldValue, false, automatedNow, automatedNow);
@@ -99,7 +743,9 @@ void AutoParam::setCurrentValueWithNoReversionOrRecording(ModelStackWithAutoPara
 void AutoParam::setCurrentValueInResponseToUserInput(int32_t value, ModelStackWithAutoParam const* modelStack,
                                                      bool shouldLogAction, int32_t livePos,
                                                      bool mayDeleteNodesInLinearRun, bool doMPEMode) {
-	int32_t oldValue = currentValue;
+	// Output space: with a landscape, a raw-index oldValue here mis-seeded the Sound's param
+	// smoother on every knob pulse — audible as faint crackle while morphing by knob.
+	int32_t oldValue = getCurrentValue();
 	bool automatedBefore = isAutomated();
 	bool automationChanged = false;
 	valueIncrementPerHalfTick = 0;
@@ -398,11 +1044,11 @@ void AutoParam::deleteAutomationBasicForSetup() {
 #define OVERRIDE_DURATION_MAGNITUDE_INTERPOLATING 15 // Means 2^x audio samples in length
 
 int32_t AutoParam::processCurrentPos(ModelStackWithAutoParam const* modelStack, bool reversed, bool didPinpong,
-                                     bool mayInterpolate, bool mustUpdateValueAtEveryNode) {
+                                     bool mayInterpolate, bool mustUpdateValueAtEveryNode, bool notifyChanges) {
 
-	// If no automation...
+	// If no automation... (landscape node lanes may still need advancing, though)
 	if (!nodes.getNumElements()) {
-		return 2147483647;
+		return processLandscapeLanesCurrentPos(modelStack, reversed, didPinpong, mayInterpolate, 2147483647);
 	}
 
 	int32_t currentPos = modelStack->getLastProcessedPos();
@@ -431,7 +1077,12 @@ int32_t AutoParam::processCurrentPos(ModelStackWithAutoParam const* modelStack, 
 		if (howFarUntilThisNode < 0) {
 			howFarUntilThisNode += effectiveLength;
 		}
-		return howFarUntilThisNode;
+		// Landscape lanes have node events of their own between this param's nodes; they must
+		// be processed and their next-event distances kept in the schedule even when we
+		// haven't reached one of OUR nodes. Skipping them here left lane interpolation
+		// running on stale increments (missed arrivals, missed step-jumps) whenever the index
+		// was automated — drifting cumulatively across loop wraps until values saturated.
+		return processLandscapeLanesCurrentPos(modelStack, reversed, didPinpong, mayInterpolate, howFarUntilThisNode);
 	}
 
 	int32_t valueJustReached = nodeJustReached->value;
@@ -728,7 +1379,9 @@ adjustNodeJustReached:
 	// become the case), we need to jump to the node's value. (Or, it'll be the value of the node to the left if the
 	// node here isn't interpolated.)
 	if ((!noNeedToJumpToValue || mustUpdateValueAtEveryNode) && !renewedOverridingAtTime) {
-		int32_t oldValue = currentValue;
+		// oldValue must be captured in output space (through the landscape, when present) so
+		// notification consumers (e.g. Sound's param-LPF smoother seed) compare like with like.
+		int32_t oldValue = getCurrentValue();
 		currentValue = valueJustReached;
 
 		// The call to notifyParamModifiedInSomeWay() below normally has the ability to delete this AutoParam, which we
@@ -738,7 +1391,9 @@ adjustNodeJustReached:
 			FREEZE_WITH_ERROR("E372");
 		}
 #endif
-		modelStack->paramCollection->notifyParamModifiedInSomeWay(modelStack, oldValue, false, true, true);
+		if (notifyChanges) {
+			modelStack->paramCollection->notifyParamModifiedInSomeWay(modelStack, oldValue, false, true, true);
+		}
 	}
 
 	if (mayInterpolate) {
@@ -768,7 +1423,7 @@ getOut:
 		}
 	}
 
-	return ticksTilNextNode;
+	return processLandscapeLanesCurrentPos(modelStack, reversed, didPinpong, mayInterpolate, ticksTilNextNode);
 }
 
 // You now much check before calling this that interpolation should happen at all
@@ -828,33 +1483,64 @@ void AutoParam::setupInterpolation(ParamNode* nextNodeInOurDirection, int32_t ef
 }
 
 bool AutoParam::tickSamples(int32_t numSamples) {
-	if (!valueIncrementPerHalfTick) {
-		return false;
+	bool changed = false;
+
+	if (valueIncrementPerHalfTick) {
+		int32_t oldValue = currentValue;
+		currentValue +=
+		    multiply_32x32_rshift32_rounded(valueIncrementPerHalfTick, playbackHandler.getTimePerInternalTickInverse())
+		    * 6 * numSamples;
+
+		// Ensure no overflow
+		bool overflowOccurred =
+		    (valueIncrementPerHalfTick >= 0) ? (currentValue < oldValue) : (currentValue > oldValue);
+		if (overflowOccurred) {
+			currentValue = (valueIncrementPerHalfTick >= 0) ? 2147483647 : -2147483648;
+			valueIncrementPerHalfTick = 0;
+		}
+		changed = true;
 	}
 
-	int32_t oldValue = currentValue;
-	currentValue +=
-	    multiply_32x32_rshift32_rounded(valueIncrementPerHalfTick, playbackHandler.getTimePerInternalTickInverse()) * 6
-	    * numSamples;
-
-	// Ensure no overflow
-	bool overflowOccurred = (valueIncrementPerHalfTick >= 0) ? (currentValue < oldValue) : (currentValue > oldValue);
-	if (overflowOccurred) {
-		currentValue = (valueIncrementPerHalfTick >= 0) ? 2147483647 : -2147483648;
-		valueIncrementPerHalfTick = 0;
+	if (landscape) {
+		for (int32_t i = 0; i < landscape->numNodes; i++) {
+			changed = landscape->nodes[i].value.tickSamples(numSamples) || changed;
+		}
+		if (landscape->slideOutputActive && landscape->slideIncrementPerHalfTick) {
+			int32_t oldSlideValue = landscape->slideOutputValue;
+			landscape->slideOutputValue +=
+			    multiply_32x32_rshift32_rounded(landscape->slideIncrementPerHalfTick,
+			                                    playbackHandler.getTimePerInternalTickInverse())
+			    * 6 * numSamples;
+			bool overflowOccurred = (landscape->slideIncrementPerHalfTick >= 0)
+			                            ? (landscape->slideOutputValue < oldSlideValue)
+			                            : (landscape->slideOutputValue > oldSlideValue);
+			if (overflowOccurred) {
+				landscape->slideOutputValue =
+				    (landscape->slideIncrementPerHalfTick >= 0) ? 2147483647 : -2147483648;
+				landscape->slideIncrementPerHalfTick = 0;
+			}
+			changed = true;
+		}
 	}
 
-	return true;
+	return changed;
 }
 
 bool AutoParam::tickTicks(int32_t numTicks) {
-	if (valueIncrementPerHalfTick == 0) {
-		return false;
+	bool changed = false;
+
+	if (valueIncrementPerHalfTick != 0) {
+		currentValue = add_saturate(currentValue, valueIncrementPerHalfTick * numTicks * 2);
+		changed = true;
 	}
 
-	currentValue = add_saturate(currentValue, valueIncrementPerHalfTick * numTicks * 2);
+	if (landscape) {
+		for (int32_t i = 0; i < landscape->numNodes; i++) {
+			changed = landscape->nodes[i].value.tickTicks(numTicks) || changed;
+		}
+	}
 
-	return true;
+	return changed;
 }
 
 void AutoParam::setValuePossiblyForRegion(int32_t value, ModelStackWithAutoParam const* modelStack, int32_t pos,
@@ -874,7 +1560,7 @@ void AutoParam::deleteNodesWithinRegion(ModelStackWithAutoParam const* modelStac
 		return;
 	}
 
-	int32_t oldValue = currentValue;
+	int32_t oldValue = getCurrentValue(); // Output space, for the notification below.
 
 	int32_t effectiveLength = modelStack->getLoopLength();
 
@@ -960,7 +1646,7 @@ setupNode:
 void AutoParam::setValueForRegion(uint32_t pos, uint32_t length, int32_t value,
                                   ModelStackWithAutoParam const* modelStack, ActionType actionType) {
 
-	int32_t oldValue = currentValue;
+	int32_t oldValue = getCurrentValue(); // Output space, for the notification below.
 	bool automatedBefore = isAutomated();
 	bool automationChanged = false;
 
@@ -1319,7 +2005,11 @@ void AutoParam::homogenizeRegionTestSuccess(int32_t pos, int32_t regionEnd, int3
 
 int32_t AutoParam::getValuePossiblyAtPos(int32_t pos, ModelStackWithAutoParam* modelStack) {
 	if (pos < 0) {
-		return getCurrentValue();
+		// Knob-editing reference. With a landscape, knobs and edits operate on the INDEX, so
+		// the reference must be index-space too — an output-space reference saturates at the
+		// param's rails before the index does and skips subranges the map compresses (the knob
+		// would fight the map and get stuck near the extremes).
+		return landscape ? getCurrentIndexValue() : getCurrentValue();
 	}
 	else {
 		return getValueAtPos(pos, modelStack);
@@ -1379,23 +2069,52 @@ returnLeftNodeValue:
 	return leftNode->value + (valueDistance * ticksSinceLeftNode / ticksBetweenNodes);
 }
 
-// Returns whether a change was made to currentValue
+// Returns whether a change was made to the (output-space) current value
 bool AutoParam::grabValueFromPos(uint32_t pos, ModelStackWithAutoParam const* modelStack) {
-	if (!nodes.getNumElements()) {
+	if (!nodes.getNumElements() && !landscape) {
 		return false;
 	}
 
-	int32_t oldValue = currentValue;
-	currentValue = getValueAtPos(pos, modelStack);
-	return (currentValue != oldValue);
+	int32_t oldOutput = getCurrentValue();
+
+	if (landscape) {
+		for (int32_t i = 0; i < landscape->numNodes; i++) {
+			AutoParam& lane = landscape->nodes[i].value;
+			if (lane.isAutomated()) {
+				lane.grabValueFromPos(pos, modelStack);
+			}
+		}
+	}
+
+	if (nodes.getNumElements()) {
+		currentValue = getValueAtPos(pos, modelStack);
+	}
+
+	return (getCurrentValue() != oldOutput);
 }
 
-void AutoParam::setPlayPos(uint32_t pos, ModelStackWithAutoParam const* modelStack, bool reversed) {
+void AutoParam::setPlayPos(uint32_t pos, ModelStackWithAutoParam const* modelStack, bool reversed, bool notifyChanges) {
+
+	// Output-space reference for the single notification below; captured before anything moves.
+	int32_t oldOutput = getCurrentValue();
+	bool anyLaneMoved = false;
+
+	if (landscape) {
+		for (int32_t i = 0; i < landscape->numNodes; i++) {
+			AutoParam& lane = landscape->nodes[i].value;
+			if (!lane.isAutomated()) {
+				continue;
+			}
+			int32_t laneValueBefore = lane.currentValue;
+			lane.setPlayPos(pos, modelStack, reversed, false);
+			anyLaneMoved = anyLaneMoved || (lane.currentValue != laneValueBefore);
+		}
+	}
 
 	valueIncrementPerHalfTick = 0; // We may calculate this, below
 	renewedOverridingAtTime = 0;
 	if (nodes.getNumElements()) {
-		int32_t oldValue = currentValue;
+		int32_t oldValue = oldOutput;
 		currentValue = getValueAtPos(pos, modelStack, reversed);
 
 		// Get next node
@@ -1421,13 +2140,33 @@ void AutoParam::setPlayPos(uint32_t pos, ModelStackWithAutoParam const* modelSta
 			setupInterpolation(nextNodeOurDirection, modelStack->getLoopLength(), pos, reversed);
 		}
 
-		modelStack->paramCollection->notifyParamModifiedInSomeWay(modelStack, oldValue, false, true, true);
+		if (notifyChanges) {
+			modelStack->paramCollection->notifyParamModifiedInSomeWay(modelStack, oldValue, false, true, true);
+		}
+	}
+
+	// If only landscape node lanes moved (index lane unautomated), still announce the output change.
+	else if (notifyChanges && anyLaneMoved && getCurrentValue() != oldOutput) {
+		modelStack->paramCollection->notifyParamModifiedInSomeWay(modelStack, oldOutput, false, true, true);
 	}
 }
 
 Error AutoParam::beenCloned(bool copyAutomation, int32_t reverseDirectionWithLength) {
 
 	Error error = Error::NONE;
+
+	// `this` is a byte-copy of the source AutoParam, so `landscape` (if set) still aliases the
+	// source's. Detach and deep-copy. (v1 limitation: node-lane content is cloned forward even
+	// when the parent clone is direction-reversed.)
+	ParamLandscape* sourceLandscape = landscape;
+	landscape = nullptr;
+	if (sourceLandscape) {
+		void* landscapeMemory = GeneralMemoryAllocator::get().allocLowSpeed(sizeof(ParamLandscape));
+		if (landscapeMemory) {
+			landscape = new (landscapeMemory) ParamLandscape();
+			landscape->cloneFrom(sourceLandscape, copyAutomation);
+		}
+	}
 
 	if (copyAutomation) {
 
@@ -1496,6 +2235,16 @@ Error AutoParam::beenCloned(bool copyAutomation, int32_t reverseDirectionWithLen
 
 // Wait, surely this should be undoable?
 void AutoParam::generateRepeats(uint32_t oldLength, uint32_t newLength, bool shouldPingpong) {
+
+	// Landscape node lanes live on the same timeline, so they repeat alongside the index lane.
+	if (landscape) {
+		for (int32_t i = 0; i < landscape->numNodes; i++) {
+			AutoParam& lane = landscape->nodes[i].value;
+			if (lane.isAutomated()) {
+				lane.generateRepeats(oldLength, newLength, shouldPingpong);
+			}
+		}
+	}
 
 	if (!nodes.getNumElements()) {
 		return;
@@ -1642,6 +2391,17 @@ void AutoParam::generateRepeats(uint32_t oldLength, uint32_t newLength, bool sho
 void AutoParam::appendParam(AutoParam* otherParam, int32_t oldLength, int32_t reverseThisRepeatWithLength,
                             bool pingpongingGenerally) {
 
+	// Arranger-clip growth: append landscape node lanes alongside the index lane. Lanes pair by
+	// position in the node array; both sides normally share an identical landscape shape because
+	// the arranger clip was cloned from the session clip when recording started.
+	if (landscape && otherParam->landscape) {
+		int32_t numPairedNodes = std::min(landscape->numNodes, otherParam->landscape->numNodes);
+		for (int32_t i = 0; i < numPairedNodes; i++) {
+			landscape->nodes[i].value.appendParam(&otherParam->landscape->nodes[i].value, oldLength,
+			                                      reverseThisRepeatWithLength, pingpongingGenerally);
+		}
+	}
+
 	int32_t numToInsert = otherParam->nodes.getNumElements();
 	if (!numToInsert) {
 		return;
@@ -1757,6 +2517,17 @@ void AutoParam::deleteNodesBeyondPos(int32_t pos) {
 }
 
 void AutoParam::trimToLength(uint32_t newLength, Action* action, ModelStackWithAutoParam const* modelStack) {
+
+	// Landscape node lanes follow the clip length too. No per-lane undo in v1 (the action
+	// snapshots only the index lane).
+	if (landscape) {
+		for (int32_t i = 0; i < landscape->numNodes; i++) {
+			AutoParam& lane = landscape->nodes[i].value;
+			if (lane.isAutomated()) {
+				lane.trimToLength(newLength, nullptr, modelStack);
+			}
+		}
+	}
 
 	// If no nodes, nothing to do
 	if (!nodes.getNumElements()) {
@@ -2013,6 +2784,16 @@ bool AutoParam::containedSomethingBefore(bool wasAutomatedBefore, uint32_t value
 }
 
 void AutoParam::shiftValues(int32_t offset) {
+	// With a landscape, the audible values live in the node lanes (the index only navigates
+	// between them), so a value shift applies to the lanes and leaves the index alone. Output
+	// near the immutable rails shifts less than offset; that's inherent to pinned rails.
+	if (landscape) {
+		for (int32_t i = 0; i < landscape->numNodes; i++) {
+			landscape->nodes[i].value.shiftValues(offset);
+		}
+		return;
+	}
+
 	int64_t newValue = (int64_t)currentValue + offset;
 	if (newValue >= (int64_t)2147483648u) {
 		currentValue = 2147483647;
@@ -2040,6 +2821,14 @@ void AutoParam::shiftValues(int32_t offset) {
 }
 
 void AutoParam::shiftParamVolumeByDB(float offset) {
+	// Same landscape rule as shiftValues(): audible values live in the node lanes.
+	if (landscape) {
+		for (int32_t i = 0; i < landscape->numNodes; i++) {
+			landscape->nodes[i].value.shiftParamVolumeByDB(offset);
+		}
+		return;
+	}
+
 	currentValue = shiftVolumeByDB(currentValue, offset);
 
 	for (int32_t i = 0; i < nodes.getNumElements(); i++) {
@@ -2050,6 +2839,12 @@ void AutoParam::shiftParamVolumeByDB(float offset) {
 
 void AutoParam::shiftHorizontally(int32_t amount, int32_t effectiveLength) {
 	nodes.shiftHorizontal(amount, effectiveLength);
+	if (landscape) {
+		for (int32_t i = 0; i < landscape->numNodes; i++) {
+			AutoParam& lane = landscape->nodes[i].value;
+			lane.nodes.shiftHorizontal(amount, effectiveLength);
+		}
+	}
 }
 
 void AutoParam::swapState(AutoParamState* state, ModelStackWithAutoParam const* modelStack) {
@@ -2377,6 +3172,15 @@ void AutoParam::deleteTime(int32_t startPos, int32_t lengthToDelete, ModelStackW
 	// No need to do any revertability with an Action here - ParamCollection::backUpAllAutomatedParamsToAction() should
 	// have already been called.
 
+	if (landscape) {
+		for (int32_t i = 0; i < landscape->numNodes; i++) {
+			AutoParam& lane = landscape->nodes[i].value;
+			if (lane.isAutomated()) {
+				lane.deleteTime(startPos, lengthToDelete, modelStack);
+			}
+		}
+	}
+
 	int32_t endPos = startPos + lengthToDelete;
 
 	int32_t start = nodes.search(startPos, GREATER_OR_EQUAL);
@@ -2446,6 +3250,12 @@ allDeleted:
 
 /// this is used in arranger view to insert time between automation nodes (shift + <>)
 void AutoParam::insertTime(int32_t pos, int32_t lengthToInsert) {
+	if (landscape) {
+		for (int32_t i = 0; i < landscape->numNodes; i++) {
+			landscape->nodes[i].value.insertTime(pos, lengthToInsert);
+		}
+	}
+
 	int32_t start = nodes.search(pos, GREATER_OR_EQUAL);
 
 	for (int32_t i = start; i < nodes.getNumElements(); i++) {
@@ -2758,6 +3568,11 @@ setNodeValue:
 
 void AutoParam::notifyPingpongOccurred() {
 	valueIncrementPerHalfTick = -valueIncrementPerHalfTick;
+	if (landscape) {
+		for (int32_t i = 0; i < landscape->numNodes; i++) {
+			landscape->nodes[i].value.notifyPingpongOccurred();
+		}
+	}
 }
 
 void AutoParam::stealNodes(ModelStackWithAutoParam const* modelStack, int32_t pos, int32_t regionLength,

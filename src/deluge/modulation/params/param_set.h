@@ -49,6 +49,11 @@ public:
 	void writeParamAsAttribute(Serializer& writer, char const* name, int32_t p, bool writeAutomation,
 	                           bool onlyIfContainsSomething = false, int32_t* valuesForOverride = nullptr);
 	void readParam(Deserializer& reader, ParamCollectionSummary* summary, int32_t p, int32_t readAutomationUpToPos);
+	/// Write all params' transformation spaces as one hex attribute (omitted when none exist).
+	void writeLandscapesAsAttribute(Serializer& writer, char const* name);
+	/// Read the attribute written by writeLandscapesAsAttribute, (re)creating landscapes and
+	/// flagging params that now need ticking.
+	void readLandscapes(Deserializer& reader, ParamCollectionSummary* summary);
 	void tickSamples(int32_t numSamples, ModelStackWithParamCollection* modelStack) final;
 	void tickTicks(int32_t numTicks, ModelStackWithParamCollection* modelStack) final;
 	void setPlayPos(uint32_t pos, ModelStackWithParamCollection* modelStack, bool reversed) final;
@@ -67,6 +72,7 @@ public:
 	void nudgeNonInterpolatingNodesAtPos(int32_t pos, int32_t offset, int32_t lengthBeforeLoop, Action* action,
 	                                     ModelStackWithParamCollection* modelStack) final;
 	void paramHasAutomationNow(ParamCollectionSummary* summary, int32_t p);
+	int32_t getLandscapeNodeIndexForLane(int32_t paramId, AutoParam* maybeLane) override;
 	void paramHasNoAutomationNow(ModelStackWithParamCollection const* modelStack, int32_t p);
 
 	void shiftParamValues(int32_t p, int32_t offset);
@@ -81,6 +87,8 @@ public:
 
 	// For undoing / redoing
 	void remotelySwapParamState(AutoParamState* state, ModelStackWithParamId* modelStack) final;
+	void remotelySwapLandscapeState(AutoParamState* indexState, ParamLandscape** storedLandscape,
+	                                ModelStackWithParamId* modelStack) final;
 
 	int32_t getNumParams() { return numParams_; }
 

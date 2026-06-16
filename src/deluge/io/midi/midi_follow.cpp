@@ -803,7 +803,10 @@ void MidiFollow::handleReceivedCC(ModelStackWithTimelineCounter& modelStackWithT
 			currentValue = modelStackWithParam->autoParam->getValuePossiblyAtPos(modPos, modelStackWithParam);
 		}
 		else {
-			currentValue = modelStackWithParam->autoParam->getCurrentValue();
+			// Index-space reference: with a landscape the controller drives the INDEX, so
+			// pickup/feedback must compare against the index, not getCurrentValue()'s transformed
+			// output (wrong space → takeover jumps or never engages). Same idiom as the gold knob.
+			currentValue = modelStackWithParam->autoParam->getValuePossiblyAtPos(-1, modelStackWithParam);
 		}
 
 		// convert current value to knobPos to compare to cc value being received
@@ -847,7 +850,8 @@ void MidiFollow::handleReceivedCC(ModelStackWithTimelineCounter& modelStackWithT
 			// mode don't display popup if you're currently editing the same param
 			if (midiEngine.midiFollowDisplayParam && !editingParamInAutomationOrPerformanceView) {
 				params::Kind kind = modelStackWithParam->paramCollection->getParamKind();
-				view.displayModEncoderValuePopup(kind, modelStackWithParam->paramId, newKnobPos);
+				view.displayModEncoderValuePopup(kind, modelStackWithParam->paramId, newKnobPos, PatchSource::NONE,
+				                                 PatchSource::NONE, modelStackWithParam->autoParam->landscape);
 			}
 		}
 	}
@@ -916,7 +920,10 @@ void MidiFollow::sendCCWithoutModelStackForMidiFollowFeedback(int32_t channel, b
 						    modelStackWithParam->autoParam->getValuePossiblyAtPos(modPos, modelStackWithParam);
 					}
 					else {
-						currentValue = modelStackWithParam->autoParam->getCurrentValue();
+						// Index-space reference: with a landscape the controller drives the INDEX, so
+						// pickup/feedback must compare against the index, not getCurrentValue()'s transformed
+						// output (wrong space → takeover jumps or never engages). Same idiom as the gold knob.
+						currentValue = modelStackWithParam->autoParam->getValuePossiblyAtPos(-1, modelStackWithParam);
 					}
 
 					// convert current value to a knob position
