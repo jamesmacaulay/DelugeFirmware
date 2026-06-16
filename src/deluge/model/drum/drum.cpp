@@ -52,6 +52,7 @@ void Drum::writeDrumTagsToFile(Serializer& writer) {
 void Drum::writeMIDICommandsToFile(Serializer& writer) {
 	midiInput.writeNoteToFile(writer, "midiInput");
 	muteMIDICommand.writeNoteToFile(writer, "midiMuteCommand");
+	defaultCCMidiInput.writeChannelToFile(writer, "defaultCCInput");
 }
 
 bool Drum::readDrumTagFromFile(Deserializer& reader, char const* tagName) {
@@ -65,6 +66,10 @@ bool Drum::readDrumTagFromFile(Deserializer& reader, char const* tagName) {
 	}
 	else if (!strcmp(tagName, "midiInput")) {
 		midiInput.readNoteFromFile(reader);
+		reader.exitTag();
+	}
+	else if (!strcmp(tagName, "defaultCCInput")) {
+		defaultCCMidiInput.readChannelFromFile(reader);
 		reader.exitTag();
 	}
 	else {

@@ -3173,6 +3173,12 @@ void PlaybackHandler::midiCCReceived(MIDICable& cable, uint8_t channel, uint8_t 
 				// NOTE: this call may change modelStackWithTimelineCounter->timelineCounter etc!
 				thisOutput->offerReceivedCCToLearnedParams(cable, channel, ccNumber, value,
 				                                           modelStackWithTimelineCounter);
+
+				// See if the output has a "Default CC Input" binding that interprets this CC via
+				// MIDI-follow's default param map. Explicitly-learned knobs still win: the handler
+				// itself skips any CC already learned to a knob here (see hasLearnedKnobForCC), so
+				// precedence does not depend on the order of these two calls.
+				thisOutput->offerReceivedCCToDefaultMap(cable, channel, ccNumber, value, modelStackWithTimelineCounter);
 			}
 
 			thisOutput->offerReceivedCC(modelStackWithTimelineCounter, cable, channel, ccNumber, value, doingMidiThru);

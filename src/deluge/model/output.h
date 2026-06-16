@@ -147,6 +147,11 @@ public:
 	virtual void offerReceivedCCToLearnedParams(MIDICable& cable, uint8_t channel, uint8_t ccNumber, uint8_t value,
 	                                            ModelStackWithTimelineCounter* modelStack) {
 	} // A TimelineCounter is required
+	/// Offer a CC to this output's "Default CC Input" binding(s), which interpret CCs on a bound
+	/// device+channel via MIDI-follow's default CC->param map. No-op for outputs without sound params.
+	/// A TimelineCounter is required.
+	virtual void offerReceivedCCToDefaultMap(MIDICable& cable, uint8_t channel, uint8_t ccNumber, uint8_t value,
+	                                         ModelStackWithTimelineCounter* modelStack) {}
 	virtual int32_t doTickForwardForArp(ModelStack* modelStack, int32_t currentPos) { return 2147483647; }
 	void endAnyArrangementRecording(Song* song, int32_t actualEndPos, uint32_t timeRemainder);
 	virtual bool wantsToBeginArrangementRecording() { return armedForRecording; }

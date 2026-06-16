@@ -62,12 +62,20 @@ public:
 	int32_t getCCFromParam(deluge::modulation::params::Kind paramKind, int32_t paramID);
 	bool isGlobalEffectableContext();
 
+	// Value stored in ccToSoundParam / ccToGlobalParam when a CC maps to no param.
+	static constexpr uint8_t kNoParamMapping = 255;
+
 	std::array<uint8_t, kMaxMIDIValue + 1> ccToSoundParam;
 	std::array<uint8_t, kMaxMIDIValue + 1> ccToGlobalParam;
 	std::array<uint8_t, params::UNPATCHED_START + params::UNPATCHED_SOUND_MAX_NUM> soundParamToCC;
 	std::array<uint8_t, params::UNPATCHED_GLOBAL_MAX_NUM> globalParamToCC;
 
-	int32_t previousKnobPos[kMaxMIDIValue + 1];
+	// Pickup-takeover reference, keyed by (incoming channel, CC). Per-channel — not just per-CC — because the
+	// same CC number can be bound to several instruments at once via per-instrument "Default CC Input"
+	// (distinguished by device+channel); a single per-CC slot would be clobbered every time you moved a
+	// different instrument's control, breaking pickup on the others. Channel is the controller-side
+	// discriminator the Default CC routing already matches on.
+	int32_t previousKnobPos[NUM_CHANNELS][kMaxMIDIValue + 1];
 	uint32_t timeLastCCSent[kMaxMIDIValue + 1];
 	uint32_t timeAutomationFeedbackLastSent;
 
@@ -75,7 +83,20 @@ public:
 	void sendCCWithoutModelStackForMidiFollowFeedback(int32_t channel, bool isAutomation = false);
 	void sendCCForMidiFollowFeedback(int32_t channel, int32_t ccNumber, int32_t knobPos);
 
-	void handleReceivedCC(ModelStackWithTimelineCounter& modelStack, Clip* clip, int32_t ccNumber, int32_t ccValue);
+	void handleReceivedCC(ModelStackWithTimelineCounter& modelStack, Clip* clip, int32_t ccNumber, int32_t ccValue,
+	                      int32_t channel);
+
+	// The two halves of handleReceivedCC, exposed so the per-instrument "Default CC Input" feature can
+	// resolve the target param itself (instrument's own clip / a specific kit-global or drum param) while
+	// reusing the exact same step-edit region handling, arrangement-record cloning, and MIDI takeover.
+	/// Computes the step-edit region and clones for arrangement recording. May change the model stack's
+	/// timeline counter, so resolve the target param AFTER calling this.
+	void prepareCCRegionForParamChange(ModelStackWithTimelineCounter& modelStack, int32_t& modPos, int32_t& modLength,
+	                                   bool& isStepEditing);
+	/// Applies an incoming CC value to an already-resolved auto param, with MIDI takeover and
+	/// automation/performance-view refresh.
+	void setParamFromCC(ModelStackWithAutoParam* modelStackWithParam, Clip* clip, int32_t ccNumber, int32_t ccValue,
+	                    int32_t modPos, int32_t modLength, bool isStepEditing, int32_t channel);
 
 private:
 	// initialize
