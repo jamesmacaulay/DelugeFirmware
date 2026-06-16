@@ -27,6 +27,7 @@ class Action;
 struct AutoParamState;
 class ParamNode;
 class AutoParam;
+class ParamLandscape;
 class CopiedParamAutomation;
 class TimelineCounter;
 class Output;
@@ -76,6 +77,14 @@ public:
 	                                     // (wait why again?). May return NULL
 
 	virtual bool mayParamInterpolate(int32_t paramId);
+	/// If maybeLane is one of paramId's transformation-space node lanes, its node index;
+	/// otherwise -1. Used to address landscape lanes in undo consequences.
+	virtual int32_t getLandscapeNodeIndexForLane(int32_t paramId, AutoParam* maybeLane) { return -1; }
+	/// Undo/redo for whole-landscape operations: swap the param's landscape pointer and index-
+	/// lane state with the stored ones. Base impl does nothing (landscapes only live on
+	/// ParamSets).
+	virtual void remotelySwapLandscapeState(AutoParamState* indexState, ParamLandscape** storedLandscape,
+	                                        ModelStackWithParamId* modelStack) {}
 	virtual bool shouldParamIndicateMiddleValue(ModelStackWithParamId const* modelStack) { return false; }
 	virtual bool doesParamIdAllowAutomation(ModelStackWithParamId const* modelStack) { return true; }
 	virtual bool shouldRecordUnautomatedParamChange(ModelStackWithParamId const* modelStack) { return true; }

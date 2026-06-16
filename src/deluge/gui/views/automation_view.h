@@ -43,6 +43,7 @@ class NoteRow;
 class ParamCollection;
 class ParamManagerForTimeline;
 class ParamNode;
+class AutoParam;
 class PatchCableSet;
 class Sound;
 class SoundDrum;
@@ -137,6 +138,77 @@ public:
 	getModelStackWithParamForClip(ModelStackWithTimelineCounter* modelStack, Clip* clip,
 	                              int32_t paramID = deluge::modulation::params::kNoParamID,
 	                              deluge::modulation::params::Kind paramKind = deluge::modulation::params::Kind::NONE);
+
+	/// Same as getModelStackWithParamForClip but never redirected to a transformation-space
+	/// node lane — always the param itself.
+	ModelStackWithAutoParam* getModelStackWithParamForClipRaw(
+	    ModelStackWithTimelineCounter* modelStack, Clip* clip, int32_t paramID = deluge::modulation::params::kNoParamID,
+	    deluge::modulation::params::Kind paramKind = deluge::modulation::params::Kind::NONE);
+
+	// Transformation space: which lane the automation editor shows/edits for the selected param.
+	// kLandscapeViewValue = the param's own (index) lane — the only view without a landscape,
+	// pixel-identical to stock. 0..numNodes-1 = that node's value lane. kLandscapeViewOutput =
+	// the flattened output (read-only).
+	static constexpr int32_t kLandscapeViewValue = -1;
+	static constexpr int32_t kLandscapeViewOutput = -2;
+	int32_t landscapeLaneView = kLandscapeViewValue;
+
+	/// A left-column slot pad (the index pad or a saved-contour slot) is currently held. While
+	/// held, the LEFT/RIGHT knobs reposition the held slot's contour (LEFT = neutral, RIGHT =
+	/// non-neutral) instead of their plain morph/edit roles. The target is the contour selected
+	/// when the pad was pressed (= landscapeLaneView), so it keeps tracking that contour through
+	/// non-neutral swaps even after the physical pad maps to a different contour. Set on a plain
+	/// slot press, cleared on the slot's release.
+	bool landscapeReposPadHeld = false;
+
+	/// V3 model: a single persistent "transform mode", toggled by plain left-encoder push.
+	/// While active, the sidebars become the lane slots (left) and knob-travel map (right);
+	/// landscapeLaneView picks the viewed lane (VALUE / OUTPUT / slot index). Exiting returns
+	/// the view to VALUE. The LEFT knob always performs on the index regardless of view.
+	bool landscapeTransformMode = false;
+
+	/// Accessibility collision avoidance: when accessibilityShortcuts is on, CROSS_SCREEN is
+	/// also the held modifier for PLAY's restart-playhead shortcut, so we can't toggle transform
+	/// mode on its press. Instead we arm on press, toggle on release, and cancel if PLAY was
+	/// pressed during the hold (used-as-modifier). Unused when accessibility is off (toggle stays
+	/// on press).
+	bool landscapeCrossScreenArmed = false;
+	bool landscapeCrossScreenUsedAsModifier = false;
+
+	/// Whether the cyan->violet output over/underlay is drawn in value/lane views
+	/// (shift+output-pad toggles it).
+	bool landscapeOverlayEnabled = true;
+
+	/// LOAD+map-tap cycling state: repeated taps on the same row step row-centre -> each saved
+	/// position in the row (ascending) -> wrap. Reset on row change or LOAD release.
+	int32_t loadMapCycleRow = -1;
+	int32_t loadMapCycleStep = 0;
+
+	/// Cached knob position of the index at last render — when it moves (knob-recorded
+	/// automation, fired recalls), the grid overlay and sidebar marker must re-render.
+	int32_t lastRenderedIndexKnobPos = -1000;
+
+	/// Hold a saved-contour slot + RIGHT turn: move that contour's position (non-neutral, may be
+	/// audible; swaps past neighbours, the view follows the moved contour). Per Option A it never
+	/// moves the index implicitly — re-park with LOAD+slot.
+	void adjustLandscapeNodePosition(ModelStackWithAutoParam* modelStackWithParam, int32_t offset);
+	/// Hold the index slot + LEFT turn: move the index while keeping the OUTPUT constant, dragging
+	/// node positions as needed (translate both blend partners; proportional against rails). Stops
+	/// at structural limits instead of breaking neutrality.
+	void neutralIndexDrag(ModelStackWithAutoParam* modelStackWithParam, int32_t offset);
+	/// Hold a saved-contour slot + LEFT turn: move that contour's position while keeping the OUTPUT
+	/// constant. The dual of neutralIndexDrag: if the contour brackets the current index, the index
+	/// rides along to preserve the blend fraction; otherwise it just moves freely. Never swaps past
+	/// a neighbour (a swap would change the index's bracket), so it stops at the neutrality limit.
+	void neutralNodeDrag(ModelStackWithAutoParam* modelStackWithParam, int32_t offset);
+
+	/// landscapeLaneView validated against the given (parent) param: VALUE when there's no
+	/// landscape or the stored node index has gone stale.
+	int32_t getLandscapeView(AutoParam* parentParam);
+	/// Redirect the stack's autoParam to the viewed node lane, when a NODE view is active.
+	void applyLandscapeLaneView(ModelStackWithAutoParam* modelStackWithParam);
+	/// Toggle transform mode (CROSS SCREEN in the automation editor; LED shows the mode).
+	void toggleLandscapeTransformMode();
 
 	// public so instrument clip view can access it
 	void initParameterSelection(bool updateDisplay = true);

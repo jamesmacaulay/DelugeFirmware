@@ -490,6 +490,11 @@ void ModControllableAudio::writeParamAttributesToFile(Serializer& writer, ParamM
                                                       bool writeAutomation, int32_t* valuesForOverride) {
 	UnpatchedParamSet* unpatchedParams = paramManager->getUnpatchedParamSet();
 
+	// Transformation spaces travel with automation (song contexts), never with presets.
+	if (writeAutomation) {
+		unpatchedParams->writeLandscapesAsAttribute(writer, "unpatchedParamLandscapes");
+	}
+
 	unpatchedParams->writeParamAsAttribute(writer, "stutterRate", params::UNPATCHED_STUTTER_RATE, writeAutomation,
 	                                       false, valuesForOverride);
 	unpatchedParams->writeParamAsAttribute(writer, "sampleRateReduction", params::UNPATCHED_SAMPLE_RATE_REDUCTION,
@@ -554,7 +559,11 @@ bool ModControllableAudio::readParamTagFromFile(Deserializer& reader, char const
 	ParamCollectionSummary* unpatchedParamsSummary = paramManager->getUnpatchedParamSetSummary();
 	UnpatchedParamSet* unpatchedParams = (UnpatchedParamSet*)unpatchedParamsSummary->paramCollection;
 
-	if (!strcmp(tagName, "equalizer")) {
+	if (!strcmp(tagName, "unpatchedParamLandscapes")) {
+		unpatchedParams->readLandscapes(reader, unpatchedParamsSummary);
+		reader.exitTag("unpatchedParamLandscapes");
+	}
+	else if (!strcmp(tagName, "equalizer")) {
 		reader.match('{');
 		while (*(tagName = reader.readNextTagOrAttributeName())) {
 			if (!strcmp(tagName, "bass")) {
@@ -1103,7 +1112,10 @@ bool ModControllableAudio::offerReceivedCCToLearnedParamsForClip(MIDICable& cabl
 					currentValue = modelStackWithParam->autoParam->getValuePossiblyAtPos(modPos, modelStackWithParam);
 				}
 				else {
-					currentValue = modelStackWithParam->autoParam->getCurrentValue();
+					// Index-space reference: with a landscape the learned knob drives the INDEX, so
+					// takeover must compare against the index, not getCurrentValue()'s transformed output
+					// (wrong space → takeover jumps or never engages). Same idiom as the gold knob.
+					currentValue = modelStackWithParam->autoParam->getValuePossiblyAtPos(-1, modelStackWithParam);
 				}
 
 				// convert current value to knobPos to compare to cc value being received
@@ -1193,7 +1205,10 @@ bool ModControllableAudio::offerReceivedCCToLearnedParamsForSong(
 					currentValue = modelStackWithParam->autoParam->getValuePossiblyAtPos(modPos, modelStackWithParam);
 				}
 				else {
-					currentValue = modelStackWithParam->autoParam->getCurrentValue();
+					// Index-space reference: with a landscape the learned knob drives the INDEX, so
+					// takeover must compare against the index, not getCurrentValue()'s transformed output
+					// (wrong space → takeover jumps or never engages). Same idiom as the gold knob.
+					currentValue = modelStackWithParam->autoParam->getValuePossiblyAtPos(-1, modelStackWithParam);
 				}
 
 				// convert current value to knobPos to compare to cc value being received

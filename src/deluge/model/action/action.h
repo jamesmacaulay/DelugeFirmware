@@ -49,6 +49,7 @@ enum class ActionType {
 	CLIP_LENGTH_DECREASE,
 	RECORD,
 	AUTOMATION_DELETE,
+	LANDSCAPE_CHANGE,
 	PARAM_UNAUTOMATED_VALUE_CHANGE,
 	SWING_CHANGE,
 	TEMPO_CHANGE,
@@ -78,6 +79,7 @@ public:
 	void addConsequence(Consequence* consequence);
 	Error revert(TimeType time, ModelStack* modelStack);
 	bool containsConsequenceParamChange(ParamCollection* paramCollection, int32_t paramId);
+	bool containsConsequenceLandscapeChange(ParamCollection* paramCollection, int32_t paramId);
 	void recordParamChangeIfNotAlreadySnapshotted(ModelStackWithAutoParam const* modelStack, bool stealData = false);
 	void recordParamChangeDefinitely(ModelStackWithAutoParam const* modelStack, bool stealData);
 	Error recordNoteArrayChangeIfNotAlreadySnapshotted(InstrumentClip* clip, int32_t noteRowId, NoteVector* noteVector,

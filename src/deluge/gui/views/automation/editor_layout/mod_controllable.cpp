@@ -16,6 +16,7 @@
  */
 
 #include "gui/views/automation/editor_layout/mod_controllable.h"
+#include "gui/views/automation_view.h"
 #include "gui/views/instrument_clip_view.h"
 #include "gui/views/view.h"
 #include "hid/display/display.h"
@@ -24,6 +25,7 @@
 #include "model/clip/clip.h"
 #include "model/instrument/midi_instrument.h"
 #include "model/song/song.h"
+#include "modulation/automation/param_landscape.h"
 #include "modulation/patch/patch_cable_set.h"
 #include "playback/mode/playback_mode.h"
 #include "playback/playback_handler.h"
@@ -53,6 +55,15 @@ const RGB rowBipolarDownTailColour[kDisplayHeight / 2] = {{53, 2, 2}, {38, 17, 2
 
 const RGB rowBipolarDownBlurColour[kDisplayHeight / 2] = {{79, 39, 39}, {77, 60, 48}, {73, 90, 62}, {71, 111, 71}};
 
+// Transformation-space output overlay palettes (cyan -> violet), contrasting with the VU-style
+// raw-lane colours above. Same geometry as the raw bars: unipolar bottom-up, bipolar centre-out
+// (index 0 = extreme, matching rowBipolarDownColour's ordering).
+const RGB rowLandscapeOutputColour[kDisplayHeight] = {{0, 255, 255},  {24, 219, 255}, {49, 182, 255}, {73, 146, 255},
+                                                      {97, 109, 255}, {121, 73, 255}, {146, 36, 255}, {170, 0, 255}};
+
+const RGB rowLandscapeBipolarOutputColour[kDisplayHeight / 2] = {
+    {170, 0, 255}, {121, 73, 255}, {73, 146, 255}, {0, 255, 255}};
+
 // lookup tables for the values that are set when you press the pads in each row of the grid
 const int32_t nonPatchCablePadPressValues[kDisplayHeight] = {0, 18, 37, 55, 73, 91, 110, 128};
 const int32_t patchCablePadPressValues[kDisplayHeight] = {-128, -90, -60, -30, 30, 60, 90, 128};
@@ -64,6 +75,51 @@ const int32_t patchCableMinPadDisplayValues[kDisplayHeight] = {-128, -96, -64, -
 // lookup tables for the max value of each pad's value range used to display automation on each row of the grid
 const int32_t nonPatchCableMaxPadDisplayValues[kDisplayHeight] = {16, 32, 48, 64, 80, 96, 112, 128};
 const int32_t patchCableMaxPadDisplayValues[kDisplayHeight] = {-97, -65, -33, -1, 32, 64, 96, 128};
+
+// How many pads a unipolar bar of this height lights. Used to pick the overlay winner by
+// QUANTISED height, so two bars that render identically (same pad count) don't fight over the
+// overlap just because one value is granularly smaller.
+static int32_t unipolarBarPadCount(int32_t knobPos) {
+	if (knobPos <= 0) {
+		return 0;
+	}
+	int32_t count = 0;
+	for (int32_t yDisplay = 0; yDisplay < kDisplayHeight; yDisplay++) {
+		if (knobPos >= nonPatchCableMinPadDisplayValues[yDisplay]) {
+			count++;
+		}
+	}
+	return count;
+}
+
+// Same idea for a bipolar (centre-out) bar: pads lit on its own side of the middle.
+static int32_t bipolarBarPadCount(int32_t knobPos, int32_t middleKnobPos, deluge::modulation::params::Kind kind) {
+	if (knobPos == middleKnobPos) {
+		return 0;
+	}
+	int32_t count = 0;
+	if (knobPos > middleKnobPos) {
+		for (int32_t yDisplay = 4; yDisplay < kDisplayHeight; yDisplay++) {
+			bool lit = (kind == deluge::modulation::params::Kind::PATCH_CABLE)
+			               ? (knobPos >= patchCableMinPadDisplayValues[yDisplay])
+			               : (knobPos >= nonPatchCableMinPadDisplayValues[yDisplay]);
+			if (lit) {
+				count++;
+			}
+		}
+	}
+	else {
+		for (int32_t yDisplay = 0; yDisplay < 4; yDisplay++) {
+			bool lit = (kind == deluge::modulation::params::Kind::PATCH_CABLE)
+			               ? (knobPos <= patchCableMaxPadDisplayValues[yDisplay])
+			               : (knobPos <= nonPatchCableMaxPadDisplayValues[yDisplay]);
+			if (lit) {
+				count++;
+			}
+		}
+	}
+	return count;
+}
 
 // summary of pad ranges and press values (format: MIN < PRESS < MAX)
 // patch cable:
@@ -95,8 +151,24 @@ void AutomationEditorLayoutModControllable::renderAutomationEditor(
     uint8_t occupancyMask[][kDisplayWidth + kSideBarWidth], int32_t renderWidth, int32_t xScroll, uint32_t xZoom,
     int32_t effectiveLength, int32_t xDisplay, bool drawUndefinedArea, params::Kind kind, bool isBipolar) {
 	if (modelStackWithParam && modelStackWithParam->autoParam) {
+		// Transformation space: in VALUE and NODE views, overlay the flattened output over the
+		// viewed lane's bars (in the OUTPUT view the main bars already ARE the output).
+		char parentModelStackMemory[MODEL_STACK_MAX_SIZE];
+		ModelStackWithAutoParam* parentStackForOverlay = nullptr;
+		if (!getOnArrangerView() && clip && automationView.landscapeOverlayEnabled
+		    && automationView.landscapeLaneView != AutomationView::kLandscapeViewOutput) {
+			ModelStackWithTimelineCounter* parentModelStack =
+			    currentSong->setupModelStackWithCurrentClip(parentModelStackMemory);
+			ModelStackWithAutoParam* parentStack =
+			    automationView.getModelStackWithParamForClipRaw(parentModelStack, clip);
+			if (parentStack && parentStack->autoParam && parentStack->autoParam->landscape) {
+				parentStackForOverlay = parentStack;
+			}
+		}
+
 		renderAutomationColumn(modelStackWithParam, image, occupancyMask, effectiveLength, xDisplay,
-		                       modelStackWithParam->autoParam->isAutomated(), xScroll, xZoom, kind, isBipolar);
+		                       modelStackWithParam->autoParam->isAutomated(), xScroll, xZoom, kind, isBipolar,
+		                       parentStackForOverlay);
 	}
 	if (drawUndefinedArea) {
 		renderUndefinedArea(xScroll, xZoom, effectiveLength, image, occupancyMask, renderWidth,
@@ -108,18 +180,35 @@ void AutomationEditorLayoutModControllable::renderAutomationEditor(
 void AutomationEditorLayoutModControllable::renderAutomationColumn(
     ModelStackWithAutoParam* modelStackWithParam, RGB image[][kDisplayWidth + kSideBarWidth],
     uint8_t occupancyMask[][kDisplayWidth + kSideBarWidth], int32_t lengthToDisplay, int32_t xDisplay, bool isAutomated,
-    int32_t xScroll, int32_t xZoom, params::Kind kind, bool isBipolar) {
+    int32_t xScroll, int32_t xZoom, params::Kind kind, bool isBipolar, ModelStackWithAutoParam* parentStackForOverlay) {
 
 	uint32_t squareStart = getMiddlePosFromSquare(xDisplay, lengthToDisplay, xScroll, xZoom);
 	int32_t knobPos = getAutomationParameterKnobPos(modelStackWithParam, squareStart) + kKnobPosOffset;
 
+	// Transformation space: flattened output at this column, for the over/underlay. Pure
+	// point-sampling at render time — no allocation, no node materialisation.
+	int32_t outputKnobPos = kNoSelection;
+	if (parentStackForOverlay) {
+		int32_t outputValue =
+		    parentStackForOverlay->autoParam->landscapeOutputAtPos(squareStart, parentStackForOverlay);
+		outputKnobPos = parentStackForOverlay->paramCollection->paramValueToKnobPos(outputValue, parentStackForOverlay)
+		                + kKnobPosOffset;
+	}
+
+	// The OUTPUT view's bars get the landscape gradient at full brightness — an unmissable
+	// cue for which lane you're looking at.
+	bool isOutputLane = !getOnArrangerView() && automationView.landscapeLaneView == AutomationView::kLandscapeViewOutput
+	                    && modelStackWithParam->autoParam->landscape;
+
 	// iterate through each square
 	for (int32_t yDisplay = 0; yDisplay < kDisplayHeight; yDisplay++) {
 		if (isBipolar) {
-			renderAutomationBipolarSquare(image, occupancyMask, xDisplay, yDisplay, isAutomated, kind, knobPos);
+			renderAutomationBipolarSquare(image, occupancyMask, xDisplay, yDisplay, isAutomated, kind, knobPos,
+			                              outputKnobPos, isOutputLane);
 		}
 		else {
-			renderAutomationUnipolarSquare(image, occupancyMask, xDisplay, yDisplay, isAutomated, knobPos);
+			renderAutomationUnipolarSquare(image, occupancyMask, xDisplay, yDisplay, isAutomated, knobPos,
+			                               outputKnobPos, isOutputLane);
 		}
 	}
 }
@@ -127,7 +216,8 @@ void AutomationEditorLayoutModControllable::renderAutomationColumn(
 /// render column for bipolar params - e.g. pan, pitch, patch cable
 void AutomationEditorLayoutModControllable::renderAutomationBipolarSquare(
     RGB image[][kDisplayWidth + kSideBarWidth], uint8_t occupancyMask[][kDisplayWidth + kSideBarWidth],
-    int32_t xDisplay, int32_t yDisplay, bool isAutomated, params::Kind kind, int32_t knobPos) {
+    int32_t xDisplay, int32_t yDisplay, bool isAutomated, params::Kind kind, int32_t knobPos, int32_t outputKnobPos,
+    bool isOutputLane) {
 	RGB& pixel = image[yDisplay][xDisplay];
 
 	int32_t middleKnobPos;
@@ -141,51 +231,57 @@ void AutomationEditorLayoutModControllable::renderAutomationBipolarSquare(
 		middleKnobPos = 64;
 	}
 
-	// if it's bipolar, only render grid rows above or below middle value
-	if (((knobPos > middleKnobPos) && (yDisplay < 4)) || ((knobPos < middleKnobPos) && (yDisplay > 3))) {
-		pixel = colours::black; // erase pad
-		return;
-	}
+	// Whether a centre-out bar of the given height reaches this row (also false for rows on
+	// the wrong side of the middle for that bar).
+	auto rowVisible = [&](int32_t barKnobPos) -> bool {
+		if (barKnobPos == middleKnobPos) {
+			return false;
+		}
+		if (barKnobPos > middleKnobPos) {
+			if (yDisplay < 4) {
+				return false;
+			}
+			return (kind == params::Kind::PATCH_CABLE) ? (barKnobPos >= patchCableMinPadDisplayValues[yDisplay])
+			                                           : (barKnobPos >= nonPatchCableMinPadDisplayValues[yDisplay]);
+		}
+		if (yDisplay > 3) {
+			return false;
+		}
+		return (kind == params::Kind::PATCH_CABLE) ? (barKnobPos <= patchCableMaxPadDisplayValues[yDisplay])
+		                                           : (barKnobPos <= nonPatchCableMaxPadDisplayValues[yDisplay]);
+	};
 
-	bool doRender = false;
+	bool doRender = rowVisible(knobPos);
+	// Transformation-space output overlay: does the flattened output's bar reach this row?
+	bool doRenderOutput = (outputKnobPos != kNoSelection) && rowVisible(outputKnobPos);
 
-	// determine whether or not you should render a row based on current value
-	if (knobPos != middleKnobPos) {
-		if (kind == params::Kind::PATCH_CABLE) {
-			if (knobPos > middleKnobPos) {
-				doRender = (knobPos >= patchCableMinPadDisplayValues[yDisplay]);
+	// render automation lane (and/or the output overlay)
+	if (doRender || doRenderOutput) {
+		if (doRender && doRenderOutput) {
+			// Overlap: the bar closer to the centre wins — compared by QUANTISED pad count
+			// (ties go to the viewed lane), so identical rendered heights don't fight.
+			int32_t rawDistance = bipolarBarPadCount(knobPos, middleKnobPos, kind);
+			int32_t outputDistance = bipolarBarPadCount(outputKnobPos, middleKnobPos, kind);
+			if (outputDistance < rawDistance) {
+				pixel = (outputKnobPos > middleKnobPos) ? rowLandscapeBipolarOutputColour[-yDisplay + 7]
+				                                        : rowLandscapeBipolarOutputColour[yDisplay];
 			}
 			else {
-				doRender = (knobPos <= patchCableMaxPadDisplayValues[yDisplay]);
+				const RGB* rawPalette = isAutomated ? rowBipolarDownColour : rowBipolarDownTailColour;
+				pixel = (knobPos > middleKnobPos) ? rawPalette[-yDisplay + 7] : rawPalette[yDisplay];
 			}
+		}
+		else if (doRenderOutput) {
+			pixel = (outputKnobPos > middleKnobPos) ? rowLandscapeBipolarOutputColour[-yDisplay + 7]
+			                                        : rowLandscapeBipolarOutputColour[yDisplay];
+		}
+		else if (isOutputLane) { // OUTPUT view: the landscape gradient, full brightness
+			pixel = (knobPos > middleKnobPos) ? rowLandscapeBipolarOutputColour[-yDisplay + 7]
+			                                  : rowLandscapeBipolarOutputColour[yDisplay];
 		}
 		else {
-			if (knobPos > middleKnobPos) {
-				doRender = (knobPos >= nonPatchCableMinPadDisplayValues[yDisplay]);
-			}
-			else {
-				doRender = (knobPos <= nonPatchCableMaxPadDisplayValues[yDisplay]);
-			}
-		}
-	}
-
-	// render automation lane
-	if (doRender) {
-		if (isAutomated) { // automated, render bright colour
-			if (knobPos > middleKnobPos) {
-				pixel = rowBipolarDownColour[-yDisplay + 7];
-			}
-			else {
-				pixel = rowBipolarDownColour[yDisplay];
-			}
-		}
-		else { // not automated, render less bright tail colour
-			if (knobPos > middleKnobPos) {
-				pixel = rowBipolarDownTailColour[-yDisplay + 7];
-			}
-			else {
-				pixel = rowBipolarDownTailColour[yDisplay];
-			}
+			const RGB* rawPalette = isAutomated ? rowBipolarDownColour : rowBipolarDownTailColour;
+			pixel = (knobPos > middleKnobPos) ? rawPalette[-yDisplay + 7] : rawPalette[yDisplay];
 		}
 		occupancyMask[yDisplay][xDisplay] = 64;
 	}
@@ -193,8 +289,11 @@ void AutomationEditorLayoutModControllable::renderAutomationBipolarSquare(
 		pixel = colours::black; // erase pad
 	}
 
-	// pad selection mode, render cursor
-	if (getPadSelectionOn() && ((xDisplay == getLeftPadSelectedX()) || (xDisplay == getRightPadSelectedX()))) {
+	// pad selection mode, render cursor (only on the viewed lane's own side, as before)
+	bool wrongSideForRaw =
+	    ((knobPos > middleKnobPos) && (yDisplay < 4)) || ((knobPos < middleKnobPos) && (yDisplay > 3));
+	if (!wrongSideForRaw && getPadSelectionOn()
+	    && ((xDisplay == getLeftPadSelectedX()) || (xDisplay == getRightPadSelectedX()))) {
 		if (doRender) {
 			if (knobPos > middleKnobPos) {
 				pixel = rowBipolarDownBlurColour[-yDisplay + 7];
@@ -213,7 +312,7 @@ void AutomationEditorLayoutModControllable::renderAutomationBipolarSquare(
 /// render column for unipolar params (e.g. not pan, pitch, or patch cables)
 void AutomationEditorLayoutModControllable::renderAutomationUnipolarSquare(
     RGB image[][kDisplayWidth + kSideBarWidth], uint8_t occupancyMask[][kDisplayWidth + kSideBarWidth],
-    int32_t xDisplay, int32_t yDisplay, bool isAutomated, int32_t knobPos) {
+    int32_t xDisplay, int32_t yDisplay, bool isAutomated, int32_t knobPos, int32_t outputKnobPos, bool isOutputLane) {
 	RGB& pixel = image[yDisplay][xDisplay];
 
 	// determine whether or not you should render a row based on current value
@@ -222,9 +321,32 @@ void AutomationEditorLayoutModControllable::renderAutomationUnipolarSquare(
 		doRender = (knobPos >= nonPatchCableMinPadDisplayValues[yDisplay]);
 	}
 
+	// Transformation-space output overlay: does the flattened output's bar reach this row?
+	bool doRenderOutput = false;
+	if (outputKnobPos != kNoSelection && outputKnobPos) {
+		doRenderOutput = (outputKnobPos >= nonPatchCableMinPadDisplayValues[yDisplay]);
+	}
+
 	// render square
-	if (doRender) {
-		if (isAutomated) { // automated, render bright colour
+	if (doRender || doRenderOutput) {
+		if (doRender && doRenderOutput) {
+			// Overlap: the shorter bar's colour wins — compared by QUANTISED pad count, so two
+			// bars of identical rendered height resolve to the viewed lane's colour instead of
+			// flickering cyan over a granular difference.
+			if (unipolarBarPadCount(outputKnobPos) < unipolarBarPadCount(knobPos)) {
+				pixel = rowLandscapeOutputColour[yDisplay];
+			}
+			else {
+				pixel = isAutomated ? rowColour[yDisplay] : rowTailColour[yDisplay];
+			}
+		}
+		else if (doRenderOutput) {
+			pixel = rowLandscapeOutputColour[yDisplay];
+		}
+		else if (isOutputLane) { // OUTPUT view: the landscape gradient, full brightness
+			pixel = rowLandscapeOutputColour[yDisplay];
+		}
+		else if (isAutomated) { // automated, render bright colour
 			pixel = rowColour[yDisplay];
 		}
 		else { // not automated, render less bright tail colour
@@ -486,6 +608,32 @@ void AutomationEditorLayoutModControllable::getAutomationParameterName(Clip* cli
 			}
 		}
 	}
+
+	// Transformation space: label which lane is being viewed/edited (and mark indexed params).
+	if (!getOnArrangerView() && clip) {
+		char modelStackMemory[MODEL_STACK_MAX_SIZE];
+		ModelStackWithTimelineCounter* modelStack = currentSong->setupModelStackWithCurrentClip(modelStackMemory);
+		ModelStackWithAutoParam* modelStackWithParam =
+		    automationView.getModelStackWithParamForClipRaw(modelStack, clip);
+		if (modelStackWithParam && modelStackWithParam->autoParam) {
+			int32_t laneView = automationView.getLandscapeView(modelStackWithParam->autoParam);
+			if (laneView == AutomationView::kLandscapeViewValue && modelStackWithParam->autoParam->landscape) {
+				parameterName.append(" ");
+				parameterName.append(l10n::get(l10n::String::STRING_FOR_LANDSCAPE_INDEXED));
+			}
+			else if (laneView == AutomationView::kLandscapeViewOutput) {
+				parameterName.append(" ");
+				parameterName.append(l10n::get(l10n::String::STRING_FOR_LANDSCAPE_OUTPUT));
+			}
+			else if (laneView >= 0) {
+				// "<param> @ 25" — the saved lane at that knob position (0-50 scale).
+				int32_t positionKnobPos = modelStackWithParam->paramCollection->paramValueToKnobPos(
+				    modelStackWithParam->autoParam->landscape->nodes[laneView].position, modelStackWithParam);
+				parameterName.append(" @ ");
+				parameterName.appendInt(((positionKnobPos + kKnobPosOffset) * 50 + 64) / 128);
+			}
+		}
+	}
 }
 
 /// toggle automation interpolation on / off
@@ -703,6 +851,12 @@ bool AutomationEditorLayoutModControllable::automationModEncoderActionForSelecte
 
 	if (modelStackWithParam && modelStackWithParam->autoParam) {
 
+		if (!getOnArrangerView() && automationView.landscapeLaneView == AutomationView::kLandscapeViewOutput
+		    && modelStackWithParam->autoParam->landscape) {
+			display->displayPopup("OUTPUT VIEW: READ ONLY");
+			return true;
+		}
+
 		int32_t xDisplay = 0;
 
 		// for a multi pad press, adjust value of first or last pad depending on mod encoder turned
@@ -841,8 +995,17 @@ void AutomationEditorLayoutModControllable::copyAutomation(ModelStackWithAutoPar
 		// the possibly invalid memory here doesn't accidentally
 		// equal modelStack->paramCollection.
 
-		modelStackWithParam->autoParam->copy(startPos, endPos, getCopiedParamAutomation(), isPatchCable,
-		                                     modelStackWithParam);
+		// Transformation space OUTPUT view: copy the flattened output — "bounce automation to
+		// anywhere". Paste it onto any param/clip as plain automation.
+		if (!getOnArrangerView() && automationView.landscapeLaneView == AutomationView::kLandscapeViewOutput
+		    && modelStackWithParam->autoParam->landscape) {
+			modelStackWithParam->autoParam->copyLandscapeOutput(startPos, endPos, getCopiedParamAutomation(),
+			                                                    isPatchCable, modelStackWithParam);
+		}
+		else {
+			modelStackWithParam->autoParam->copy(startPos, endPos, getCopiedParamAutomation(), isPatchCable,
+			                                     modelStackWithParam);
+		}
 
 		if (getCopiedParamAutomation()->nodes) {
 			display->displayPopup(l10n::get(l10n::String::STRING_FOR_AUTOMATION_COPIED));
@@ -857,6 +1020,13 @@ void AutomationEditorLayoutModControllable::pasteAutomation(ModelStackWithAutoPa
                                                             int32_t effectiveLength, int32_t xScroll, int32_t xZoom) {
 	if (!getCopiedParamAutomation()->nodes) {
 		display->displayPopup(l10n::get(l10n::String::STRING_FOR_NO_AUTOMATION_TO_PASTE));
+		return;
+	}
+
+	// Transformation space OUTPUT view is read-only (paste targets a real lane — switch views).
+	if (!getOnArrangerView() && automationView.landscapeLaneView == AutomationView::kLandscapeViewOutput
+	    && modelStackWithParam && modelStackWithParam->autoParam && modelStackWithParam->autoParam->landscape) {
+		display->displayPopup("OUTPUT VIEW: READ ONLY");
 		return;
 	}
 
@@ -939,8 +1109,22 @@ uint32_t AutomationEditorLayoutModControllable::getMiddlePosFromSquare(int32_t x
 // and also used for increasing/decreasing parameter values with the mod encoders
 int32_t AutomationEditorLayoutModControllable::getAutomationParameterKnobPos(ModelStackWithAutoParam* modelStack,
                                                                              uint32_t squareStart) {
-	// obtain value corresponding to the two pads that were pressed in a multi pad press action
-	int32_t currentValue = modelStack->autoParam->getValuePossiblyAtPos(squareStart, modelStack);
+	int32_t currentValue;
+
+	// Transformation space OUTPUT view: grid columns show the flattened output, but the live
+	// (negative-pos) reference stays the INDEX — the right knob keeps performing on it while
+	// the output is displayed.
+	if (!getOnArrangerView() && automationView.landscapeLaneView == AutomationView::kLandscapeViewOutput
+	    && modelStack->autoParam->landscape) {
+		currentValue = ((int32_t)squareStart < 0)
+		                   ? modelStack->autoParam->getValuePossiblyAtPos((int32_t)squareStart, modelStack)
+		                   : modelStack->autoParam->landscapeOutputAtPos(squareStart, modelStack);
+	}
+	else {
+		// obtain value corresponding to the two pads that were pressed in a multi pad press action
+		currentValue = modelStack->autoParam->getValuePossiblyAtPos(squareStart, modelStack);
+	}
+
 	int32_t knobPos = modelStack->paramCollection->paramValueToKnobPos(currentValue, modelStack);
 
 	return knobPos;
@@ -984,6 +1168,14 @@ void AutomationEditorLayoutModControllable::setAutomationParameterValue(ModelSta
                                                                         int32_t xDisplay, int32_t effectiveLength,
                                                                         int32_t xScroll, int32_t xZoom,
                                                                         bool modEncoderAction) {
+
+	// Transformation space OUTPUT view is read-only: a drawn output value has no unique
+	// decomposition into index + landscape (write-back is a designed-for later extension).
+	if (!getOnArrangerView() && automationView.landscapeLaneView == AutomationView::kLandscapeViewOutput
+	    && modelStack->autoParam->landscape) {
+		display->displayPopup("OUTPUT VIEW: READ ONLY");
+		return;
+	}
 
 	int32_t newValue = modelStack->paramCollection->knobPosToParamValue(knobPos, modelStack);
 
@@ -1056,6 +1248,22 @@ void AutomationEditorLayoutModControllable::setAutomationKnobIndicatorLevels(Mod
                                                                              int32_t knobPosRight) {
 	params::Kind kind = modelStack->paramCollection->getParamKind();
 	bool isBipolar = isParamBipolar(kind, modelStack->paramId);
+
+	// Transformation space: the LEFT knob always controls the INDEX, so its ring shows the
+	// index — not the viewed lane's value (which stays on the right ring). Resolve the param
+	// itself; with no landscape this changes nothing.
+	if (!getOnArrangerView()) {
+		Clip* clip = getCurrentClip();
+		char parentModelStackMemory[MODEL_STACK_MAX_SIZE];
+		ModelStackWithTimelineCounter* parentModelStack =
+		    currentSong->setupModelStackWithCurrentClip(parentModelStackMemory);
+		ModelStackWithAutoParam* parentStack = automationView.getModelStackWithParamForClipRaw(parentModelStack, clip);
+		if (parentStack && parentStack->autoParam && parentStack->autoParam->landscape) {
+			knobPosLeft = parentStack->paramCollection->paramValueToKnobPos(
+			                  parentStack->autoParam->getCurrentIndexValue(), parentStack)
+			              + kKnobPosOffset;
+		}
+	}
 
 	// if you're dealing with a patch cable which has a -128 to +128 range
 	// we'll need to convert it to a 0 - 128 range for purpose of rendering on knob indicators

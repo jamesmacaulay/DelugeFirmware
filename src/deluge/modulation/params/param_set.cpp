@@ -27,8 +27,10 @@
 #include "model/model_stack.h"
 #include "model/note/note_row.h"
 #include "model/song/song.h"
+#include "modulation/automation/param_landscape.h"
 #include "modulation/params/param.h"
 #include "modulation/params/param_manager.h"
+#include "modulation/params/param_node.h"
 #include "modulation/patch/patch_cable_set.h"
 #include "processing/engines/audio_engine.h"
 #include "processing/sound/sound.h"
@@ -63,7 +65,11 @@ void ParamSet::notifyParamModifiedInSomeWay(ModelStackWithAutoParam const* model
 		if (automatedNow) {
 			paramHasAutomationNow(modelStack->summary, modelStack->paramId);
 		}
-		else {
+		// A param whose landscape node lanes are automated must keep its summary bit (and so
+		// keep getting ticked) even when its own (index) lane just lost its automation. Resolve
+		// via params[paramId]: with a lane-stacked notification, modelStack->autoParam is the
+		// lane, but the bit belongs to the parent.
+		else if (!params[modelStack->paramId].needsTicking()) {
 			paramHasNoAutomationNow(modelStack, modelStack->paramId);
 		}
 	}
@@ -77,6 +83,18 @@ void ParamSet::shiftParamValues(int32_t p, int32_t offset) {
 
 void ParamSet::shiftParamVolumeByDB(int32_t p, float offset) {
 	params[p].shiftParamVolumeByDB(offset);
+}
+
+int32_t ParamSet::getLandscapeNodeIndexForLane(int32_t paramId, AutoParam* maybeLane) {
+	ParamLandscape* landscape = params[paramId].landscape;
+	if (landscape) {
+		for (int32_t i = 0; i < landscape->numNodes; i++) {
+			if (&landscape->nodes[i].value == maybeLane) {
+				return i;
+			}
+		}
+	}
+	return -1;
 }
 
 void ParamSet::paramHasAutomationNow(ParamCollectionSummary* summary, int32_t p) {
@@ -103,7 +121,7 @@ void ParamSet::paramHasNoAutomationNow(ModelStackWithParamCollection const* mode
 	}
 
 inline void ParamSet::checkWhetherParamHasInterpolationNow(ModelStackWithParamCollection const* modelStack, int32_t p) {
-	if (params[p].valueIncrementPerHalfTick) {
+	if (params[p].hasActiveInterpolation()) {
 		modelStack->summary->whichParamsAreInterpolating[p >> 5] |= ((uint32_t)1 << (p & 31));
 	}
 }
@@ -205,11 +223,172 @@ void ParamSet::readParam(Deserializer& reader, ParamCollectionSummary* summary, 
 	}
 }
 
+// Transformation-space serialization. One attribute carries the landscapes of every param in
+// this set, all fixed-width hex, fully self-describing via counts so old firmware just skips
+// the unknown attribute:
+//   per param:  paramId, numNodes
+//   per node:   position, flags (low byte reserved for curve type; 0 = linear),
+//               laneCurrentValue, laneNumNodes
+//   per lane node: value, pos (bit 31 = interpolated — same packing as AutoParam::writeToFile)
+void ParamSet::writeLandscapesAsAttribute(Serializer& writer, char const* name) {
+
+	bool anyLandscapes = false;
+	for (int32_t p = 0; p < numParams_; p++) {
+		if (params[p].landscape && params[p].landscape->numNodes) {
+			anyLandscapes = true;
+			break;
+		}
+	}
+	if (!anyLandscapes) {
+		return;
+	}
+
+	char buffer[9];
+
+	writer.insertCommaIfNeeded();
+	writer.write("\n");
+	writer.printIndents();
+	writer.writeTagNameAndSeperator(name);
+	writer.write("\"");
+
+	for (int32_t p = 0; p < numParams_; p++) {
+		ParamLandscape* landscape = params[p].landscape;
+		if (!landscape || !landscape->numNodes) {
+			continue;
+		}
+
+		intToHex(p, buffer);
+		writer.write(buffer);
+		intToHex(landscape->numNodes, buffer);
+		writer.write(buffer);
+
+		for (int32_t i = 0; i < landscape->numNodes; i++) {
+			ParamLandscape::Node* node = &landscape->nodes[i];
+			AutoParam* lane = &node->value;
+
+			intToHex(node->position, buffer);
+			writer.write(buffer);
+			intToHex(0, buffer); // Flags; low byte reserved for curve type.
+			writer.write(buffer);
+			intToHex(lane->getCurrentIndexValue(), buffer);
+			writer.write(buffer);
+			intToHex(lane->nodes.getNumElements(), buffer);
+			writer.write(buffer);
+
+			for (int32_t n = 0; n < lane->nodes.getNumElements(); n++) {
+				ParamNode* laneNode = lane->nodes.getElement(n);
+				intToHex(laneNode->value, buffer);
+				writer.write(buffer);
+				uint32_t pos = laneNode->pos;
+				if (laneNode->interpolated) {
+					pos |= ((uint32_t)1 << 31);
+				}
+				intToHex(pos, buffer);
+				writer.write(buffer);
+			}
+		}
+	}
+
+	writer.write("\"");
+}
+
+namespace {
+bool readNextHexInt32(Deserializer& reader, int32_t* out) {
+	char const* hexChars = reader.readNextCharsOfTagOrAttributeValue(8);
+	if (!hexChars) {
+		return false;
+	}
+	*out = hexToIntFixedLength(hexChars, 8);
+	return true;
+}
+} // namespace
+
+void ParamSet::readLandscapes(Deserializer& reader, ParamCollectionSummary* summary) {
+
+	if (!reader.prepareToReadTagOrAttributeValueOneCharAtATime()) {
+		return;
+	}
+
+	int32_t p;
+	while (readNextHexInt32(reader, &p)) {
+		if (p < 0 || p >= numParams_) {
+			return; // Malformed; can't resync, so stop.
+		}
+
+		int32_t numNodes;
+		if (!readNextHexInt32(reader, &numNodes) || numNodes < 1 || numNodes > ParamLandscape::kMaxInteriorNodes) {
+			return;
+		}
+
+		params[p].freeLandscape(); // In case we're overwriting a reused/cloned ParamManager.
+		ParamLandscape* landscape = params[p].getOrCreateLandscape();
+		if (!landscape) {
+			return; // Allocation failed; give up on the rest of the attribute.
+		}
+
+		int32_t prevPosition = -2147483648;
+
+		for (int32_t i = 0; i < numNodes; i++) {
+			int32_t position, flags, laneValue, laneNumNodes;
+			if (!readNextHexInt32(reader, &position) || !readNextHexInt32(reader, &flags)
+			    || !readNextHexInt32(reader, &laneValue) || !readNextHexInt32(reader, &laneNumNodes)) {
+				params[p].freeLandscape();
+				return;
+			}
+			if ((i && position <= prevPosition) || laneNumNodes < 0 || laneNumNodes > 65536) {
+				params[p].freeLandscape();
+				return;
+			}
+			prevPosition = position;
+
+			ParamLandscape::Node* node = &landscape->nodes[i];
+			node->position = position;
+			node->value.setCurrentValueBasicForSetup(laneValue);
+
+			if (laneNumNodes) {
+				Error error = node->value.nodes.insertAtIndex(0, laneNumNodes);
+				if (error != Error::NONE) {
+					params[p].freeLandscape();
+					return;
+				}
+				int32_t prevLaneNodePos = -1;
+				for (int32_t n = 0; n < laneNumNodes; n++) {
+					int32_t value, posAndInterpolation;
+					if (!readNextHexInt32(reader, &value) || !readNextHexInt32(reader, &posAndInterpolation)) {
+						params[p].freeLandscape();
+						return;
+					}
+					int32_t pos = posAndInterpolation & ~((uint32_t)1 << 31);
+					if (pos <= prevLaneNodePos) {
+						params[p].freeLandscape();
+						return;
+					}
+					prevLaneNodePos = pos;
+					ParamNode* laneNode = node->value.nodes.getElement(n);
+					laneNode->pos = pos;
+					laneNode->value = value;
+					laneNode->interpolated = (posAndInterpolation & ((uint32_t)1 << 31)) != 0;
+				}
+			}
+
+			landscape->numNodes = i + 1; // Kept valid as we go, for the bail-out paths above.
+		}
+
+		if (params[p].needsTicking()) {
+			paramHasAutomationNow(summary, p);
+		}
+	}
+}
+
 void ParamSet::playbackHasEnded(ModelStackWithParamCollection* modelStack) {
 
-	FOR_EACH_FLAGGED_PARAM(modelStack->summary->whichParamsAreInterpolating);
-	params[p].valueIncrementPerHalfTick = 0;
-	FOR_EACH_PARAM_END
+	// All params, not just currently-flagged-interpolating ones: the slide smoother's active
+	// flag must be cleared even when its increment happened to be zero at the stop moment
+	// (otherwise getCurrentValue() stays frozen at the last morphed output — HW-suspected as
+	// a stale overlay/audio mismatch).
+	for (int32_t p = 0; p < numParams_; p++) {
+		params[p].stopAllInterpolation();
+	}
 
 	modelStack->summary->resetInterpolationRecord(topUintToRepParams);
 }
@@ -259,7 +438,7 @@ void ParamSet::trimToLength(uint32_t newLength, ModelStackWithParamCollection* m
 	ModelStackWithAutoParam* modelStackWithAutoParam = modelStack->addAutoParam(p, param);
 
 	params[p].trimToLength(newLength, action, modelStackWithAutoParam);
-	if (!params[p].isAutomated()) {
+	if (!params[p].needsTicking()) {
 		paramHasNoAutomationNow(modelStack, p);
 	}
 
@@ -286,10 +465,38 @@ void ParamSet::remotelySwapParamState(AutoParamState* state, ModelStackWithParam
 
 	AutoParam* param = &params[modelStack->paramId];
 
+	// Snapshots of a transformation-space node lane must swap with that lane, not the param's
+	// own (index) lane. If the landscape has meanwhile disappeared or shrunk, fall back to the
+	// param itself (can't corrupt; just a degraded undo for an already-edge case).
+	if (state->landscapeNodeIndex >= 0 && param->landscape && state->landscapeNodeIndex < param->landscape->numNodes) {
+		param = &param->landscape->nodes[state->landscapeNodeIndex].value;
+	}
+
 	ModelStackWithAutoParam* modelStackWithParam = modelStack->addAutoParam(param);
 
 	param->swapState(state, modelStackWithParam);
 	int32_t oldValue = params[modelStack->paramId].getCurrentValue();
+}
+
+void ParamSet::remotelySwapLandscapeState(AutoParamState* indexState, ParamLandscape** storedLandscape,
+                                          ModelStackWithParamId* modelStack) {
+	AutoParam* param = &params[modelStack->paramId];
+
+	// Swap landscape pointers (either side may be nullptr).
+	ParamLandscape* liveLandscape = param->landscape;
+	param->landscape = *storedLandscape;
+	*storedLandscape = liveLandscape;
+
+	// Swap the index lane's nodes + value (notifies, which also maintains the summary bit via
+	// the needsTicking()-aware clear guard).
+	ModelStackWithAutoParam* modelStackWithParam = modelStack->addAutoParam(param);
+	param->swapState(indexState, modelStackWithParam);
+
+	// Gaining a landscape with automated lanes must (re)flag the param for ticking even when
+	// the index lane is unautomated.
+	if (param->needsTicking()) {
+		paramHasAutomationNow(modelStack->summary, modelStack->paramId);
+	}
 }
 
 void ParamSet::deleteAllAutomation(Action* action, ModelStackWithParamCollection* modelStack) {
@@ -306,6 +513,14 @@ void ParamSet::deleteAllAutomation(Action* action, ModelStackWithParamCollection
 	}
 
 	modelStack->summary->resetInterpolationRecord(topUintToRepParams);
+
+	// Landscapes (and their automated node lanes) survive delete-all-automation — that gesture
+	// targets the index lanes. Re-flag any params whose landscapes still need ticking.
+	for (int32_t p = 0; p < numParams_; p++) {
+		if (params[p].needsTicking()) {
+			paramHasAutomationNow(modelStack->summary, p);
+		}
+	}
 }
 
 /// this is used in arranger view to insert time between automation nodes (shift = <>)
@@ -325,7 +540,7 @@ void ParamSet::deleteTime(ModelStackWithParamCollection* modelStack, int32_t sta
 
 	ModelStackWithAutoParam* modelStackWithAutoParam = modelStack->addAutoParam(p, &params[p]);
 	params[p].deleteTime(startPos, lengthToDelete, modelStackWithAutoParam);
-	if (!params[p].isAutomated()) {
+	if (!params[p].needsTicking()) {
 		paramHasNoAutomationNow(modelStack, p);
 	}
 
@@ -342,7 +557,7 @@ void ParamSet::nudgeNonInterpolatingNodesAtPos(int32_t pos, int32_t offset, int3
 
 	param->nudgeNonInterpolatingNodesAtPos(pos, offset, lengthBeforeLoop, action, modelStackWithAutoParam);
 
-	if (!params[p].isAutomated()) {
+	if (!params[p].needsTicking()) {
 		paramHasNoAutomationNow(modelStack, p);
 	}
 
@@ -471,7 +686,21 @@ void PatchedParamSet::notifyParamModifiedInSomeWay(ModelStackWithAutoParam const
 
 	// If the Clip is active (or there isn't one)...
 	if (!modelStack->timelineCounterIsSet() || ((Clip*)modelStack->getTimelineCounter())->isActiveOnOutput()) {
-		int32_t current_value = modelStack->autoParam->getCurrentValue();
+		// With a lane-stacked notification (transformation-space node-lane edit), both values
+		// must be translated into the param's output space before the Sound hears about them —
+		// the lane's raw values would otherwise poison the engine's value for this paramId.
+		AutoParam* ownParam = &params[modelStack->paramId];
+		int32_t current_value;
+		if (modelStack->autoParam != ownParam && ownParam->landscape) {
+			current_value = ownParam->getCurrentValue();
+			int32_t laneIndex = getLandscapeNodeIndexForLane(modelStack->paramId, modelStack->autoParam);
+			oldValue = (laneIndex >= 0) ? ownParam->landscape->transformWithLaneValue(ownParam->getCurrentIndexValue(),
+			                                                                          laneIndex, oldValue)
+			                            : current_value;
+		}
+		else {
+			current_value = modelStack->autoParam->getCurrentValue();
+		}
 		bool current_value_changed = modelStack->modControllable->valueChangedEnoughToMatter(
 		    oldValue, current_value, getParamKind(), modelStack->paramId);
 		if (current_value_changed) {
