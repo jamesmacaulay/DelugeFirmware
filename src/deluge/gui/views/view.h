@@ -141,6 +141,23 @@ public:
 	                                       int32_t newKnobPos);
 	void sendMidiFollowFeedback(ModelStackWithAutoParam* modelStackWithParam = nullptr, int32_t knobPos = kNoSelection,
 	                            bool isAutomation = false);
+	// Shared feedback seam aimed at an explicit clip (not the viewed context) — e.g. a clip cue-launched while
+	// unviewed. Fans out to each feedback consumer (learned knobs target the clip; follow keeps its own
+	// followed-instrument target). New consumers plug in here rather than at each trigger site.
+	void sendFeedbackForClip(ModelStackWithTimelineCounter* clipContext);
+	// Feedback for playback start: mirror every output's active-clip learned knobs (each to its own
+	// controller), with follow firing once to its own target. Broader than sendFeedbackForClip's single clip.
+	void sendFeedbackForAllActiveClips();
+	// MIDI-learned-knob feedback (MidiInputAutoFeedback, default off): echo the active instrument's learned
+	// knobs out to their controllers — per-edit echo (modelStackWithParam set) and context-sync (null). Fired
+	// from sendMidiFollowFeedback's call sites; skips the per-tick automation mirror (isAutomation).
+	void sendLearnedKnobFeedback(ModelStackWithAutoParam* modelStackWithParam, bool isAutomation);
+	// Follow's shared-channel feedback (the channel block factored out of sendMidiFollowFeedback so the
+	// explicit-clip seam can reuse it). Sends only in clip context, to follow's resolved target.
+	void sendFollowFeedback(ModelStackWithAutoParam* modelStackWithParam, int32_t knobPos, bool isAutomation);
+	// Learned-knob half of the explicit-clip seam, shared by sendFeedbackForClip and
+	// sendFeedbackForAllActiveClips. Gated on MidiInputAutoFeedback; no-op for a null/song clip context.
+	void sendLearnedKnobFeedbackForClipContext(ModelStackWithTimelineCounter* clipContext);
 
 	// vu meter rendering
 	bool displayVUMeter;
