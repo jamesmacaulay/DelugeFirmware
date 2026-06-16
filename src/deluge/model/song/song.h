@@ -221,6 +221,16 @@ public:
 
 	Section sections[kMaxNumSections];
 
+	// Song-global "section launch PC input": an optional device+channel binding whose incoming Program
+	// Change messages launch sections by index — PC value N arms section N (a scene), mirroring a press of
+	// that section's launch pad. Channel-only (the PC value is the index, not part of the binding). Like the
+	// per-section launchMIDICommand it is per-song state (serialized in the song, not in shareable presets).
+	LearnedMIDI sectionLaunchPCInput;
+
+	/// True if at least one session clip belongs to the given section (so a section-launch wouldn't just
+	/// stop everything). Used to ignore a PC that indexes an empty section.
+	bool anySessionClipsInSection(int32_t section);
+
 	MusicalKey key;
 	std::bitset<NUM_PRESET_SCALES> disabledPresetScales;
 
