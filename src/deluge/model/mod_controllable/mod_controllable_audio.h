@@ -75,6 +75,10 @@ public:
 	                                           ModelStackWithTimelineCounter* modelStack, int32_t noteRowIndex = -1);
 	bool offerReceivedCCToLearnedParamsForSong(MIDICable& cable, uint8_t channel, uint8_t ccNumber, uint8_t value,
 	                                           ModelStackWithThreeMainThings* modelStackWithThreeMainThings);
+	/// Whether a CC has been explicitly learned (via LEARN + edit param) to a knob here for this exact
+	/// cable+channel+CC. Used so the "Default CC Input" map defers to explicit learns rather than
+	/// double-handling the same CC.
+	bool hasLearnedKnobForCC(MIDICable& cable, uint8_t channel, uint8_t ccNumber);
 	bool offerReceivedPitchBendToLearnedParams(MIDICable& cable, uint8_t channel, uint8_t data1, uint8_t data2,
 	                                           ModelStackWithTimelineCounter* modelStack, int32_t noteRowIndex = -1);
 	/// Learna knob to a particular parameter.
@@ -164,10 +168,14 @@ protected:
 	bool enableGrain();
 	void disableGrain();
 
-private:
-	void doEQ(bool doBass, bool doTreble, int32_t* inputL, int32_t* inputR, int32_t bassAmount, int32_t trebleAmount);
+protected:
+	// Builds the per-note-row ModelStackWithThreeMainThings for this ModControllable (used to resolve a
+	// drum's params by note-row index). Protected so kit-row CC routing on SoundDrum can reuse it.
 	ModelStackWithThreeMainThings* addNoteRowIndexAndStuff(ModelStackWithTimelineCounter* modelStack,
 	                                                       int32_t noteRowIndex);
+
+private:
+	void doEQ(bool doBass, bool doTreble, int32_t* inputL, int32_t* inputR, int32_t bassAmount, int32_t trebleAmount);
 	void switchHPFModeWithOff();
 	void switchLPFModeWithOff();
 

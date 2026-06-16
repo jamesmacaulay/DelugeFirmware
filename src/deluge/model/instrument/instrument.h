@@ -89,6 +89,12 @@ public:
 
 	uint8_t defaultVelocity = FlashStorage::defaultVelocity;
 	LearnedMIDI midiInput;
+	// Optional device+channel binding whose CCs are interpreted via MIDI-follow's default CC->param map
+	// (see MidiFollow::ccToSoundParam / ccToGlobalParam). This is the instrument-level "Default CC Input":
+	// "MIDI learn for all the default mappings at once", tied to the instrument rather than to selection.
+	// Like midiInput, it is a per-song binding (not saved into shareable presets) and its mere presence
+	// (channelOrZone != MIDI_CHANNEL_NONE) is what enables the behaviour - there is no separate toggle.
+	LearnedMIDI defaultCCMidiInput;
 
 protected:
 	Clip* createNewClipForArrangementRecording(ModelStack* modelStack) final;

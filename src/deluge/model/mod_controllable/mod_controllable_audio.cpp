@@ -1159,6 +1159,15 @@ bool ModControllableAudio::offerReceivedCCToLearnedParamsForClip(MIDICable& cabl
 	return messageUsed;
 }
 
+bool ModControllableAudio::hasLearnedKnobForCC(MIDICable& cable, uint8_t channel, uint8_t ccNumber) {
+	for (MIDIKnob& knob : midi_knobs) {
+		if (knob.midiInput.equalsNoteOrCC(&cable, channel, ccNumber)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 bool ModControllableAudio::offerReceivedCCToLearnedParamsForSong(
     MIDICable& cable, uint8_t channel, uint8_t ccNumber, uint8_t value,
     ModelStackWithThreeMainThings* modelStackWithThreeMainThings) {

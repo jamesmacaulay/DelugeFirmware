@@ -55,7 +55,7 @@ using namespace gui;
 #define MIDI_DEFAULTS_TAG "defaults"
 #define MIDI_DEFAULTS_CC_TAG "defaultCCMappings"
 
-constexpr int32_t PARAM_ID_NONE = 255;
+constexpr int32_t PARAM_ID_NONE = MidiFollow::kNoParamMapping;
 
 PLACE_SDRAM_BSS MidiFollow midiFollow{};
 
@@ -73,7 +73,9 @@ void MidiFollow::initState() {
 	successfullyReadDefaultsFromFile = false;
 	for (int32_t i = 0; i < (kMaxMIDIValue + 1); i++) {
 		timeLastCCSent[i] = 0;
-		previousKnobPos[i] = kNoSelection;
+		for (int32_t c = 0; c < NUM_CHANNELS; c++) {
+			previousKnobPos[c][i] = kNoSelection;
+		}
 	}
 
 	timeAutomationFeedbackLastSent = 0;
@@ -734,7 +736,7 @@ void MidiFollow::midiCCReceived(MIDICable& cable, uint8_t channel, uint8_t ccNum
 
 					if (modelStackWithTimelineCounter) {
 						// See if it's learned to a parameter
-						handleReceivedCC(*modelStackWithTimelineCounter, clip, ccNumber, ccValue);
+						handleReceivedCC(*modelStackWithTimelineCounter, clip, ccNumber, ccValue, channel);
 					}
 				}
 			}
@@ -763,12 +765,11 @@ void MidiFollow::midiCCReceived(MIDICable& cable, uint8_t channel, uint8_t ccNum
 /// if the cc has been learned, it sets the new value for that parameter
 /// this function works by first checking the active context to see if there is an active clip
 /// to determine if the cc intends to control a song level or clip level parameter
-void MidiFollow::handleReceivedCC(ModelStackWithTimelineCounter& modelStackWithTimelineCounter, Clip* clip,
-                                  int32_t ccNumber, int32_t ccValue) {
-
-	int32_t modPos = 0;
-	int32_t modLength = 0;
-	bool isStepEditing = false;
+void MidiFollow::prepareCCRegionForParamChange(ModelStackWithTimelineCounter& modelStackWithTimelineCounter,
+                                               int32_t& modPos, int32_t& modLength, bool& isStepEditing) {
+	modPos = 0;
+	modLength = 0;
+	isStepEditing = false;
 
 	if (modelStackWithTimelineCounter.timelineCounterIsSet()) {
 		TimelineCounter* timelineCounter = modelStackWithTimelineCounter.getTimelineCounter();
@@ -783,6 +784,15 @@ void MidiFollow::handleReceivedCC(ModelStackWithTimelineCounter& modelStackWithT
 
 		timelineCounter->possiblyCloneForArrangementRecording(&modelStackWithTimelineCounter);
 	}
+}
+
+void MidiFollow::handleReceivedCC(ModelStackWithTimelineCounter& modelStackWithTimelineCounter, Clip* clip,
+                                  int32_t ccNumber, int32_t ccValue, int32_t channel) {
+
+	int32_t modPos = 0;
+	int32_t modLength = 0;
+	bool isStepEditing = false;
+	prepareCCRegionForParamChange(modelStackWithTimelineCounter, modPos, modLength, isStepEditing);
 
 	// directly access the parameter from the CC number
 	uint8_t soundParamId = ccToSoundParam[ccNumber];
@@ -794,6 +804,13 @@ void MidiFollow::handleReceivedCC(ModelStackWithTimelineCounter& modelStackWithT
 
 	ModelStackWithAutoParam* modelStackWithParam = getModelStackWithParam(
 	    &modelStackWithTimelineCounter, clip, soundParamId, globalParamId, midiEngine.midiFollowDisplayParam);
+
+	setParamFromCC(modelStackWithParam, clip, ccNumber, ccValue, modPos, modLength, isStepEditing, channel);
+}
+
+void MidiFollow::setParamFromCC(ModelStackWithAutoParam* modelStackWithParam, Clip* clip, int32_t ccNumber,
+                                int32_t ccValue, int32_t modPos, int32_t modLength, bool isStepEditing,
+                                int32_t channel) {
 	// check if model stack is valid
 	if (modelStackWithParam && modelStackWithParam->autoParam) {
 		int32_t currentValue;
@@ -813,7 +830,8 @@ void MidiFollow::handleReceivedCC(ModelStackWithTimelineCounter& modelStackWithT
 		int32_t knobPos = modelStackWithParam->paramCollection->paramValueToKnobPos(currentValue, modelStackWithParam);
 
 		// calculate new knob position based on cc value received and deluge current value
-		int32_t newKnobPos = MidiTakeover::calculateKnobPos(knobPos, ccValue, nullptr, true, ccNumber, isStepEditing);
+		int32_t newKnobPos =
+		    MidiTakeover::calculateKnobPos(knobPos, ccValue, nullptr, true, ccNumber, isStepEditing, channel);
 
 		// is the cc being received for the same value as the current knob pos? If so, do nothing
 		if (newKnobPos != knobPos) {
