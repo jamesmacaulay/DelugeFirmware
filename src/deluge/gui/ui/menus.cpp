@@ -106,6 +106,7 @@
 #include "gui/menu_item/midi/mpe_to_mono.h"
 #include "gui/menu_item/midi/pgm.h"
 #include "gui/menu_item/midi/program.h"
+#include "gui/menu_item/midi/section_launch_pc_input.h"
 #include "gui/menu_item/midi/sound/channel.h"
 #include "gui/menu_item/midi/sound/note_for_drum.h"
 #include "gui/menu_item/midi/sub.h"
@@ -1648,6 +1649,8 @@ Submenu songThresholdRecordingSubmenu{
 
 song::ConfigureMacros configureSongMacrosMenu{STRING_FOR_CONFIGURE_SONG_MACROS};
 song::MidiLearn midiLearnMenu{STRING_FOR_MIDI_LEARN};
+midi::SectionLaunchPCInput sectionLaunchPCInputMenu{STRING_FOR_SECTION_LAUNCH_PC_INPUT,
+                                                    STRING_FOR_SECTION_LAUNCH_PC_INPUT};
 
 // Root menu for Song View
 menu_item::Submenu soundEditorRootMenuSongView{
@@ -1661,6 +1664,7 @@ menu_item::Submenu soundEditorRootMenuSongView{
         &songThresholdRecordingSubmenu,
         &configureSongMacrosMenu,
         &midiLearnMenu,
+        &sectionLaunchPCInputMenu,
         &stemExportMenu,
     },
 };

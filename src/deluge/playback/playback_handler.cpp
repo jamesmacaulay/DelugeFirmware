@@ -2894,6 +2894,22 @@ void PlaybackHandler::programChangeReceived(MIDICable& cable, int32_t channel, i
 		}
 	}
 	else {
+		// Song-global section launcher: if this PC arrived on the learned "section launch PC input" source,
+		// treat its value as a section index and arm that section — exactly as if its launch pad were pressed.
+		// The channel is dedicated to section control, so we then stop (don't also offer the PC to learned
+		// global commands / section / clip triggers, which would double-fire). An out-of-range or empty
+		// section is a deliberate no-op so a stray PC can't silently stop everything.
+		if (currentSong->sectionLaunchPCInput.containsSomething()
+		    && currentSong->sectionLaunchPCInput.equalsChannelAllowMPE(&cable, channel)) {
+			if (program < kMaxNumSections && currentSong->anySessionClipsInSection(program)) {
+				if (arrangement.hasPlaybackActive()) {
+					switchToSession();
+				}
+				session.armSection(program, kMIDIKeyInputLatency);
+			}
+			return;
+		}
+
 		// we build ontop of the CC hack
 		offerNoteToLearnedThings(cable, true, channel + IS_A_PC, program);
 	}

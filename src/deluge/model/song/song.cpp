@@ -1276,6 +1276,9 @@ weAreInArrangementEditorOrInClipInstance:
 	}
 	writer.writeArrayEnding("sections");
 
+	// Song-global section-launch PC input (channel-only binding; omitted when nothing is learned).
+	sectionLaunchPCInput.writeChannelToFile(writer, "sectionLaunchPCInput");
+
 	writer.writeArrayStart("sessionClips");
 	for (int32_t c = 0; c < sessionClips.getNumElements(); c++) {
 		Clip* clip = sessionClips.getClipAtIndex(c);
@@ -1881,6 +1884,11 @@ unknownTag:
 					reader.exitTag(tagName);
 				}
 				reader.exitTag("scales", true);
+			}
+
+			else if (!strcmp(tagName, "sectionLaunchPCInput")) {
+				sectionLaunchPCInput.readChannelFromFile(reader);
+				reader.exitTag();
 			}
 
 			else if (!strcmp(tagName, "sections")) {
@@ -4092,6 +4100,15 @@ int32_t Song::getLowestSectionWithNoSessionClipForOutput(Output* output) {
 	}
 
 	return 0;
+}
+
+bool Song::anySessionClipsInSection(int32_t section) {
+	for (int32_t c = 0; c < sessionClips.getNumElements(); c++) {
+		if (sessionClips.getClipAtIndex(c)->section == section) {
+			return true;
+		}
+	}
+	return false;
 }
 
 void Song::assertActiveness(ModelStackWithTimelineCounter* modelStack, int32_t endInstanceAtTime) {
