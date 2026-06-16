@@ -2526,6 +2526,23 @@ void Session::unsoloClip(Clip* clip) {
 	currentSong->reassessWhetherAnyClipsSoloing();
 
 	if (!hasPlaybackActive()) {
+		// When stopped, the playback re-activation loop below is skipped — but it's also what restores the
+		// active-clip pointers to the activeIfNoSolo clips. Without it, output->getActiveClip() stays stuck on
+		// the just-unsoloed clip until next playback, leaving follow/learned-knob *control* (and feedback)
+		// pointed at the wrong clip. Re-assert activeness here so the state is correct immediately. As with the
+		// sibling stopped-activation paths (toggleClipStatus / soloClipAction), this goes via
+		// assertActiveness -> setActiveClip, which can emit a Program Change (default PgmChangeSend::ONCE) but
+		// has no tick/playback side effects while stopped. Only when this was the last soloing clip.
+		if (!currentSong->getAnyClipsSoloing()) {
+			char modelStackMemory[MODEL_STACK_MAX_SIZE];
+			ModelStack* modelStack = setupModelStackWithSong(modelStackMemory, currentSong);
+			for (int32_t c = 0; c < currentSong->sessionClips.getNumElements(); c++) {
+				Clip* thisClip = currentSong->sessionClips.getClipAtIndex(c);
+				if (thisClip != clip && thisClip->activeIfNoSolo) {
+					currentSong->assertActiveness(modelStack->addTimelineCounter(thisClip));
+				}
+			}
+		}
 		return;
 	}
 
