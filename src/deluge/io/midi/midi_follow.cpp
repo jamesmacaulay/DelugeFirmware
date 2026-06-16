@@ -27,6 +27,7 @@
 #include "hid/display/display.h"
 #include "io/midi/midi_device.h"
 #include "io/midi/midi_engine.h"
+#include "io/midi/midi_feedback_working_set.h"
 #include "io/midi/midi_takeover.h"
 #include "model/clip/clip_instance.h"
 #include "model/clip/instrument_clip.h"
@@ -820,6 +821,12 @@ void MidiFollow::handleReceivedCC(ModelStackWithTimelineCounter& modelStackWithT
 
 			// Set the new Parameter Value for the MIDI Learned Parameter
 			modelStackWithParam->autoParam->setValuePossiblyForRegion(newValue, modelStackWithParam, modPos, modLength);
+
+			// Controller-side touch: warm this param in the shared feedback working set (A3) so the other
+			// feedback consumers will mirror it.
+			midiFeedbackWorkingSet.recordTouch(modelStackWithParam->modControllable,
+			                                   modelStackWithParam->paramCollection->getParamKind(),
+			                                   modelStackWithParam->paramId);
 
 			// check if you're currently editing the same learned param in automation view or
 			// performance view if so, you will need to refresh the automation editor grid or the

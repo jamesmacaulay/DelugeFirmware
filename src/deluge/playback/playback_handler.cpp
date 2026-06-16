@@ -567,9 +567,10 @@ void PlaybackHandler::setupPlayback(int32_t newPlaybackState, int32_t playFromPo
 	// We can only set these to -1 after calling the stuff above
 	// lastSwungTickDone = -1;
 
-	// when starting playback send updated feedback values for the current clip
-	// or active clip selected for midi follow control
-	view.sendMidiFollowFeedback();
+	// When starting playback, mirror every track's active-clip learned knobs out to their controllers (each
+	// addresses its own device), and send follow feedback once for its own target — so all controllers match
+	// the Deluge at play, not just the viewed track.
+	view.sendFeedbackForAllActiveClips();
 }
 
 void PlaybackHandler::endPlayback() {

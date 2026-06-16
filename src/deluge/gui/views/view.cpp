@@ -52,6 +52,7 @@
 #include "io/midi/midi_device.h"
 #include "io/midi/midi_device_manager.h"
 #include "io/midi/midi_engine.h"
+#include "io/midi/midi_feedback_working_set.h"
 #include "io/midi/midi_follow.h"
 #include "lib/printf.h"
 #include "model/action/action_logger.h"
@@ -1658,9 +1659,11 @@ int32_t View::getModKnobMode() {
 }
 
 void View::notifyParamAutomationOccurred(ParamManager* paramManager, bool updateModLevels) {
-	if (paramManager == activeModControllableModelStack.paramManager
-	    || (getCurrentUI() == &soundEditor && paramManager == soundEditor.currentParamManager)) {
+	bool isViewedContext = (paramManager == activeModControllableModelStack.paramManager
+	                        || (getCurrentUI() == &soundEditor && paramManager == soundEditor.currentParamManager));
 
+	if (isViewedContext) {
+		// The on-screen automation display only tracks the viewed context.
 		// If timer wasn't set yet, set it now
 		if (!uiTimerManager.isTimerSet(TimerName::DISPLAY_AUTOMATION)) {
 			pendingParamAutomationUpdatesModLevels = updateModLevels;
@@ -1672,7 +1675,17 @@ void View::notifyParamAutomationOccurred(ParamManager* paramManager, bool update
 				pendingParamAutomationUpdatesModLevels = true;
 			}
 		}
+	}
 
+	// Automation feedback is NOT limited to the viewed context: each consumer's send path resolves its own
+	// target, so the timer must also be armed when automation occurs on a clip that isn't being viewed — e.g.
+	// the active clip while you're in song/grid view, where the viewed context is the song and never matches a
+	// clip's paramManager. Arm it whenever a consumer wants automation feedback: MIDI-follow (its channel set)
+	// or learned knobs (MidiInputAutoFeedback). The send paths filter to their own targets / working set, so a
+	// background clip's automation isn't mis-sent. The send rate is still gated by the follow automation-
+	// feedback rate in the timer handler (DISABLED = off for both consumers).
+	if (isViewedContext || midiEngine.midiFollowFeedbackChannelType != MIDIFollowChannelType::NONE
+	    || runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::MidiInputAutoFeedback)) {
 		if (!uiTimerManager.isTimerSet(TimerName::SEND_MIDI_FEEDBACK_FOR_AUTOMATION)) {
 			uiTimerManager.setTimer(TimerName::SEND_MIDI_FEEDBACK_FOR_AUTOMATION, 25);
 		}
@@ -1680,24 +1693,144 @@ void View::notifyParamAutomationOccurred(ParamManager* paramManager, bool update
 }
 
 void View::sendMidiFollowFeedback(ModelStackWithAutoParam* modelStackWithParam, int32_t knobPos, bool isAutomation) {
-	if (midiEngine.midiFollowFeedbackChannelType != MIDIFollowChannelType::NONE) {
-		int32_t channel =
-		    midiEngine.midiFollowChannelType[util::to_underlying(midiEngine.midiFollowFeedbackChannelType)]
-		        .channelOrZone;
-		if (channel != MIDI_CHANNEL_NONE) {
-			// check if we're dealing with a clip context param (don't send feedback for song params)
-			if (isClipContext()) {
-				if (modelStackWithParam && modelStackWithParam->autoParam) {
-					params::Kind kind = modelStackWithParam->paramCollection->getParamKind();
-					int32_t ccNumber = midiFollow.getCCFromParam(kind, modelStackWithParam->paramId);
-					if (ccNumber != MIDI_CC_NONE) {
-						midiFollow.sendCCForMidiFollowFeedback(channel, ccNumber, knobPos);
-					}
-				}
-				else {
-					midiFollow.sendCCWithoutModelStackForMidiFollowFeedback(channel, isAutomation);
-				}
+	// Record the edit in the shared feedback working set (A3). Deluge-side touches (gold knob / menu /
+	// automation pad) all funnel through here with the param set. Skip context-sync (no param) and automation
+	// playback (isAutomation) — neither is a user touch.
+	if (modelStackWithParam && modelStackWithParam->autoParam && !isAutomation) {
+		midiFeedbackWorkingSet.recordTouch(modelStackWithParam->modControllable,
+		                                   modelStackWithParam->paramCollection->getParamKind(),
+		                                   modelStackWithParam->paramId);
+	}
+
+	// Independent of follow's feedback channel: echo learned-knob values to their own controllers.
+	sendLearnedKnobFeedback(modelStackWithParam, isAutomation);
+
+	// Follow's shared feedback channel mirrors the viewed/followed context.
+	sendFollowFeedback(modelStackWithParam, knobPos, isAutomation);
+}
+
+void View::sendFollowFeedback(ModelStackWithAutoParam* modelStackWithParam, int32_t knobPos, bool isAutomation) {
+	if (midiEngine.midiFollowFeedbackChannelType == MIDIFollowChannelType::NONE) {
+		return;
+	}
+	int32_t channel =
+	    midiEngine.midiFollowChannelType[util::to_underlying(midiEngine.midiFollowFeedbackChannelType)].channelOrZone;
+	if (channel == MIDI_CHANNEL_NONE) {
+		return;
+	}
+	if (modelStackWithParam && modelStackWithParam->autoParam) {
+		// Per-edit echo of a specific param. Gate on the VIEWED context being a clip: don't emit a clip CC for
+		// an edit to a song-global param (the gold knobs control song FX in song view).
+		if (!isClipContext()) {
+			return;
+		}
+		params::Kind kind = modelStackWithParam->paramCollection->getParamKind();
+		int32_t ccNumber = midiFollow.getCCFromParam(kind, modelStackWithParam->paramId);
+		if (ccNumber != MIDI_CC_NONE) {
+			midiFollow.sendCCForMidiFollowFeedback(channel, ccNumber, knobPos);
+		}
+	}
+	else {
+		// Context-sync: resolve follow's own target (getSelectedOrActiveClip) and mirror it. This is inherently
+		// clip-scoped (it self-skips when there's no clip), so it must NOT be gated by isClipContext() — that
+		// checks the *viewed* context, which is the song while you're in song/grid view, and would wrongly
+		// suppress feedback for the active clip you're launching/playing. This is what lets follow feedback
+		// track a clip launched from song view, matching follow *control* (which has no such guard).
+		midiFollow.sendCCWithoutModelStackForMidiFollowFeedback(channel, isAutomation);
+	}
+}
+
+void View::sendLearnedKnobFeedbackForClipContext(ModelStackWithTimelineCounter* clipContext) {
+	// Learned-knob consumer of the feedback seam, for one explicit clip. Each learned knob addresses its OWN
+	// physical controller, so the clip's bound knobs mirror regardless of what's being viewed. Gated on the
+	// MidiInputAutoFeedback flag. Shared by every feedback trigger that targets a specific clip.
+	if (!runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::MidiInputAutoFeedback)) {
+		return;
+	}
+	if (!clipContext || !clipContext->timelineCounterIsSet()) {
+		return;
+	}
+	Clip* clip = (Clip*)clipContext->getTimelineCounter();
+	if (clip->output) {
+		clip->output->sendLearnedKnobFeedbackForClip(clipContext);
+	}
+}
+
+void View::sendFeedbackForClip(ModelStackWithTimelineCounter* clipContext) {
+	// Shared feedback trigger aimed at a SPECIFIC clip rather than the viewed context — e.g. a clip
+	// cue-launched while unviewed. Each consumer applies the clip per its own destination policy. Future
+	// consumers (Default CC Input, follow track-control) plug in via the helpers fanned out below.
+	sendLearnedKnobFeedbackForClipContext(clipContext);
+
+	// Follow consumer: a single shared follow channel tracks ONE instrument (getSelectedOrActiveClip), so a
+	// background launch must not hijack it — follow resolves its own target and ignores the launched clip.
+	sendFollowFeedback(nullptr, kNoSelection, false);
+}
+
+void View::sendFeedbackForAllActiveClips() {
+	// Used at playback start: every output now has an active clip, so mirror each track's learned knobs to
+	// their own controllers — not just the viewed track. Symmetric with the CC-input path, which likewise
+	// applies to every output's getActiveClip() (playback_handler.cpp). Broadcasting is correct because each
+	// learned knob addresses its own physical controller (no shared destination to contend for). The flag is
+	// checked up front so the default-off case does no per-output work.
+	if (runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::MidiInputAutoFeedback)) {
+		char modelStackMemory[MODEL_STACK_MAX_SIZE];
+		ModelStack* modelStack = setupModelStackWithSong(modelStackMemory, currentSong);
+		for (Output* output = currentSong->firstOutput; output; output = output->next) {
+			if (Clip* activeClip = output->getActiveClip()) {
+				sendLearnedKnobFeedbackForClipContext(modelStack->addTimelineCounter(activeClip));
 			}
+		}
+	}
+
+	// Follow consumer: once, to its own resolved target (a single shared channel).
+	sendFollowFeedback(nullptr, kNoSelection, false);
+}
+
+void View::sendLearnedKnobFeedback(ModelStackWithAutoParam* modelStackWithParam, bool isAutomation) {
+	if (!runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::MidiInputAutoFeedback)) {
+		return;
+	}
+	// Per-tick automation mirror: handled separately, because automation can move params on instruments other
+	// than the one being viewed, so it iterates all active clips rather than the viewed context. Bounded to the
+	// recently-touched working set so it doesn't flood the bus every tick.
+	if (isAutomation) {
+		sendLearnedKnobAutomationFeedback();
+		return;
+	}
+	// Learned-knob feedback only applies to a clip's instrument, not song params.
+	if (!isClipContext()) {
+		return;
+	}
+	ModControllable* modControllable = activeModControllableModelStack.modControllable;
+	ParamManager* paramManager = activeModControllableModelStack.paramManager;
+	TimelineCounter* timelineCounter = activeModControllableModelStack.getTimelineCounterAllowNull();
+	if (modControllable == nullptr || paramManager == nullptr || timelineCounter == nullptr) {
+		return;
+	}
+	// Rebuild the active context's "three main things" in a fresh MODEL_STACK_MAX_SIZE buffer: the resolver
+	// (getParamFromMIDIKnob -> addParamCollectionAndId) overlays larger stack structs in place, which would
+	// overflow the bare activeModControllableModelStack member — it must run on a full-size buffer.
+	char modelStackMemory[MODEL_STACK_MAX_SIZE];
+	ModelStackWithThreeMainThings* modelStack = setupModelStackWithSong(modelStackMemory, currentSong)
+	                                                ->addTimelineCounter(timelineCounter)
+	                                                ->addOtherTwoThingsButNoNoteRow(modControllable, paramManager);
+	// Virtual: a no-op unless this mod-controllable owns MIDI-learned knobs (ModControllableAudio).
+	modControllable->sendLearnedKnobFeedback(modelStack, modelStackWithParam);
+}
+
+void View::sendLearnedKnobAutomationFeedback() {
+	// Per-tick automation mirror for learned knobs (MidiInputAutoFeedback already confirmed on by the caller).
+	// Iterate every live active-clip output and send each learned knob that is automated AND in the
+	// recently-touched working set. Two reasons it iterates live outputs rather than the viewed context or the
+	// ring's stored pointers: (1) automation can be moving params on instruments you aren't viewing; (2) the
+	// ring is only ever used as a membership filter, never dereferenced, so a stale ModControllable pointer
+	// from a deleted instrument can't be touched here. The send rate is throttled by the timer that calls us.
+	char modelStackMemory[MODEL_STACK_MAX_SIZE];
+	ModelStack* modelStack = setupModelStackWithSong(modelStackMemory, currentSong);
+	for (Output* output = currentSong->firstOutput; output; output = output->next) {
+		if (Clip* activeClip = output->getActiveClip()) {
+			output->sendLearnedKnobFeedbackForClip(modelStack->addTimelineCounter(activeClip), /*forAutomation=*/true);
 		}
 	}
 }

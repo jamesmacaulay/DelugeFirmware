@@ -269,10 +269,10 @@ notRecording:
 							// setActiveClip() is actually the only relevant bit
 							bool activeClipChanged = output->setActiveClip(modelStackWithTimelineCounter);
 							if (activeClipChanged) {
-								// the play cursor has selected a new active clip for the current output
-								// send updated feedback so that midi controller has the latest values for
-								// the current clip selected for midi follow control
-								view.sendMidiFollowFeedback();
+								// The play cursor has made a new clip active for this output (possibly one not being
+								// viewed). Feed back through the shared seam with the now-active clip, so learned knobs
+								// mirror its values to their controllers (follow keeps its own followed target).
+								view.sendFeedbackForClip(modelStackWithTimelineCounter);
 							}
 						}
 

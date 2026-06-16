@@ -1369,6 +1369,16 @@ Note: these settings are saved to `SETTINGS/CommunityFeatures.XML` on your SD ca
     * When On, some menu items render in horizontal menus, with multiple items visible and editable at the same time.
 * `Trim from start of audio clips (TRIM)`
     * When On, the ability to trim from the start of an audio clip without needing to reverse it is enabled.
+* `Input Auto Feedback (IAFB)`
+    * When On, MIDI-learned knobs echo their current value back out to the controller they were learned from,
+      so the controller mirrors the Deluge. Feedback is sent when you change a parameter on the Deluge, when
+      you select a clip/instrument, and whenever a clip becomes active (launch, solo, section launch, playback
+      start). Default Off. Sends only to the knob's own device; knobs learned device-agnostically are skipped.
+      This is distinct from MIDI Follow's own feedback (configured under `SETTINGS > MIDI > MIDI-FOLLOW`).
+    * While playback is running, learned knobs also follow parameter automation live, but only for the last 16
+      parameters you have recently touched (so a dense song doesn't flood the bus every tick). This per-tick
+      automation feedback uses the same rate as MIDI Follow's automation feedback (`SETTINGS > MIDI >
+      MIDI-FOLLOW > FEEDBACK`); with that rate set to `DISABLED` no per-tick automation feedback is sent.
 
 ## 6. Sysex Handling
 

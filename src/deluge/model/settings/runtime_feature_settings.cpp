@@ -200,6 +200,13 @@ void RuntimeFeatureSettings::init() {
 	SetupOnOffSetting(settings[RuntimeFeatureSettingType::ShowBatteryLevel],
 	                  STRING_FOR_COMMUNITY_FEATURE_SHOW_BATTERY_LEVEL, "showBatteryLevel",
 	                  RuntimeFeatureStateToggle::On);
+
+	// MIDI Input Auto Feedback: automatically echo a param's value back to the controller that's sending
+	// input (learned-knob PICKUP sync now; default-CC-input feedback later). Off by default because it emits
+	// MIDI the user didn't explicitly request, which a controller may mishandle or a DIN chain may fan out.
+	SetupOnOffSetting(settings[RuntimeFeatureSettingType::MidiInputAutoFeedback],
+	                  STRING_FOR_COMMUNITY_FEATURE_MIDI_INPUT_AUTO_FEEDBACK, "midiInputAutoFeedback",
+	                  RuntimeFeatureStateToggle::Off);
 }
 
 void RuntimeFeatureSettings::readSettingsFromFile() {

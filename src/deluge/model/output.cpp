@@ -23,6 +23,7 @@
 #include "model/clip/clip_instance.h"
 #include "model/clip/instrument_clip.h"
 #include "model/consequence/consequence_clip_existence.h"
+#include "model/mod_controllable/mod_controllable.h"
 #include "model/model_stack.h"
 #include "model/song/clip_iterators.h"
 #include "model/song/song.h"
@@ -582,6 +583,13 @@ void Output::endArrangementPlayback(Song* song, int32_t actualEndPos, uint32_t t
 
 Clip* Output::getActiveClip() const {
 	return activeClip;
+}
+
+void Output::sendLearnedKnobFeedbackForClip(ModelStackWithTimelineCounter* modelStack, bool forAutomation) {
+	// Single-instrument outputs (synth/MIDI/CV): the whole clip maps to one mod-controllable, no NoteRow.
+	if (ModControllable* modControllable = toModControllable()) {
+		modControllable->sendLearnedKnobFeedbackForClip(modelStack, -1, forAutomation);
+	}
 }
 
 /*
