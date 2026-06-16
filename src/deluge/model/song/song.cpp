@@ -34,6 +34,7 @@
 #include "hid/matrix/matrix_driver.h"
 #include "io/midi/device_specific/specific_midi_device.h"
 #include "io/midi/midi_engine.h"
+#include "io/midi/midi_feedback_working_set.h"
 #include "memory/general_memory_allocator.h"
 #include "model/action/action_logger.h"
 #include "model/clip/audio_clip.h"
@@ -206,6 +207,10 @@ Song::Song() : backedUpParamManagers(sizeof(BackedUpParamManager)) {
 }
 
 Song::~Song() {
+
+	// The feedback working set holds mod-controllable pointers from this song; they're about to become
+	// invalid, so forget them (a fresh song could reuse the addresses).
+	midiFeedbackWorkingSet.clear();
 
 	// Delete existing Clips, if any
 	for (int32_t c = 0; c < sessionClips.getNumElements(); c++) {
@@ -1276,6 +1281,9 @@ weAreInArrangementEditorOrInClipInstance:
 	}
 	writer.writeArrayEnding("sections");
 
+	// Song-global section-launch PC input (channel-only binding; omitted when nothing is learned).
+	sectionLaunchPCInput.writeChannelToFile(writer, "sectionLaunchPCInput");
+
 	writer.writeArrayStart("sessionClips");
 	for (int32_t c = 0; c < sessionClips.getNumElements(); c++) {
 		Clip* clip = sessionClips.getClipAtIndex(c);
@@ -1881,6 +1889,11 @@ unknownTag:
 					reader.exitTag(tagName);
 				}
 				reader.exitTag("scales", true);
+			}
+
+			else if (!strcmp(tagName, "sectionLaunchPCInput")) {
+				sectionLaunchPCInput.readChannelFromFile(reader);
+				reader.exitTag();
 			}
 
 			else if (!strcmp(tagName, "sections")) {
@@ -4092,6 +4105,15 @@ int32_t Song::getLowestSectionWithNoSessionClipForOutput(Output* output) {
 	}
 
 	return 0;
+}
+
+bool Song::anySessionClipsInSection(int32_t section) {
+	for (int32_t c = 0; c < sessionClips.getNumElements(); c++) {
+		if (sessionClips.getClipAtIndex(c)->section == section) {
+			return true;
+		}
+	}
+	return false;
 }
 
 void Song::assertActiveness(ModelStackWithTimelineCounter* modelStack, int32_t endInstanceAtTime) {

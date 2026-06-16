@@ -484,6 +484,13 @@ which track to record from. The source can also be selected by pressing a clip's
 
 - ([#3794]) Added toggle in `SETTINGS > DEFAULTS > UI > USE SHARPS(#) (SHRP)` to allow users to choose which accidentals to display. When enabled in OLED mode, notes will be displayed as A# or D#, as they did prior to this change. When disabled, notes will be displayed as B♭ or E♭. In 7SEG mode, a dot is used to indicade when the note has the configured accidental. If selected, `D.` will mean D#. If not selected, `D.` will mean D♭.
 
+#### 3.37 Section Launch via Program Change
+
+- Added a song-global `SECTION LAUNCH PC` (`SPC`) menu under the `SONG` menu, which learns a single MIDI device + channel whose incoming **Program Change** messages launch sections by index: a `PC` with value `N` arms section `N` (a scene), exactly as if that section's launch pad were pressed (quantized to the current launch timing).
+  - To learn the source: enter `SONG > SECTION LAUNCH PC`, hold `LEARN` and send a Program Change from your controller. Only the device + channel are captured (the PC value is the section index, not part of the binding). Turn `SELECT` past either end of the channel range, or use the unlearn action, to clear it.
+  - The bound channel is dedicated to section control: while learned, Program Changes on it drive sections and are not also offered to learned global commands / clips. A PC that indexes an out-of-range or empty section is a deliberate no-op, so a stray message can't silently stop everything.
+  - The binding is saved per-song (like the existing per-section launch MIDI commands), not baked into shareable presets.
+
 ## 4. New Features Added
 
 Here is a list of features that have been added to the firmware as a list, grouped by category:
@@ -1369,6 +1376,16 @@ Note: these settings are saved to `SETTINGS/CommunityFeatures.XML` on your SD ca
     * When On, some menu items render in horizontal menus, with multiple items visible and editable at the same time.
 * `Trim from start of audio clips (TRIM)`
     * When On, the ability to trim from the start of an audio clip without needing to reverse it is enabled.
+* `Input Auto Feedback (IAFB)`
+    * When On, MIDI-learned knobs echo their current value back out to the controller they were learned from,
+      so the controller mirrors the Deluge. Feedback is sent when you change a parameter on the Deluge, when
+      you select a clip/instrument, and whenever a clip becomes active (launch, solo, section launch, playback
+      start). Default Off. Sends only to the knob's own device; knobs learned device-agnostically are skipped.
+      This is distinct from MIDI Follow's own feedback (configured under `SETTINGS > MIDI > MIDI-FOLLOW`).
+    * While playback is running, learned knobs also follow parameter automation live, but only for the last 16
+      parameters you have recently touched (so a dense song doesn't flood the bus every tick). This per-tick
+      automation feedback uses the same rate as MIDI Follow's automation feedback (`SETTINGS > MIDI >
+      MIDI-FOLLOW > FEEDBACK`); with that rate set to `DISABLED` no per-tick automation feedback is sent.
 
 ## 6. Sysex Handling
 

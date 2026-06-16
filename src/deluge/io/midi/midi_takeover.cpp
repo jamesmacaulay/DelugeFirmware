@@ -29,17 +29,17 @@ using namespace deluge;
 using namespace gui;
 
 void savePreviousKnobPos(int32_t knobPos, MIDIKnob* knob = nullptr, bool doingMidiFollow = false,
-                         int32_t ccNumber = MIDI_CC_NONE);
+                         int32_t ccNumber = MIDI_CC_NONE, int32_t channel = MIDI_CHANNEL_NONE);
 void saveKnobPos(int32_t knobPos, MIDIKnob* knob);
-void saveKnobPos(int32_t knobPos, int32_t ccNumber);
+void saveKnobPos(int32_t knobPos, int32_t channel, int32_t ccNumber);
 int32_t getPreviousKnobPos(int32_t knobPos, MIDIKnob* knob = nullptr, bool doingMidiFollow = false,
-                           int32_t ccNumber = MIDI_CC_NONE);
+                           int32_t ccNumber = MIDI_CC_NONE, int32_t channel = MIDI_CHANNEL_NONE);
 
 /// based on the midi takeover default setting of RELATIVE, JUMP, PICKUP, or SCALE
 /// this function will calculate the knob position that the deluge parameter that the midi cc
 /// received is learned to should be set at based on the midi cc value received
 int32_t MidiTakeover::calculateKnobPos(int32_t knobPos, int32_t ccValue, MIDIKnob* knob, bool doingMidiFollow,
-                                       int32_t ccNumber, bool isStepEditing) {
+                                       int32_t ccNumber, bool isStepEditing, int32_t channel) {
 	/*
 
 	Step #1: Convert Midi Controller's CC Value to Deluge Knob Position Value
@@ -77,20 +77,20 @@ int32_t MidiTakeover::calculateKnobPos(int32_t knobPos, int32_t ccValue, MIDIKno
 		newKnobPos = std::max(newKnobPos, lowerLimit);
 		newKnobPos = std::min(newKnobPos, 64_i32);
 
-		savePreviousKnobPos(newKnobPos, knob, doingMidiFollow, ccNumber);
+		savePreviousKnobPos(newKnobPos, knob, doingMidiFollow, ccNumber, channel);
 	}
 	// deluge value will always jump to the current midi controller value
 	else if (midiEngine.midiTakeover == MIDITakeoverMode::JUMP || isRecording || isStepEditing) {
 		newKnobPos = midiKnobPos;
 
-		savePreviousKnobPos(newKnobPos, knob, doingMidiFollow, ccNumber);
+		savePreviousKnobPos(newKnobPos, knob, doingMidiFollow, ccNumber, channel);
 	}
 	else { // Midi Takeover Mode = Pickup or Value Scaling
 		// Get or Save previous knob position for first time
 		// The first time a midi knob is turned in a session, no previous midi knob position information exists, so to
 		// start, it will be equal to the current midiKnobPos.
 
-		int32_t previousKnobPosition = getPreviousKnobPos(midiKnobPos, knob, doingMidiFollow, ccNumber);
+		int32_t previousKnobPosition = getPreviousKnobPos(midiKnobPos, knob, doingMidiFollow, ccNumber, channel);
 
 		// have we met or exceeded the deluge knob position in either direction?
 		// if so, we've "picked up"
@@ -159,7 +159,7 @@ int32_t MidiTakeover::calculateKnobPos(int32_t knobPos, int32_t ccValue, MIDIKno
 			}
 		}
 
-		savePreviousKnobPos(midiKnobPos, knob, doingMidiFollow, ccNumber);
+		savePreviousKnobPos(midiKnobPos, knob, doingMidiFollow, ccNumber, channel);
 	}
 
 	return newKnobPos;
@@ -167,12 +167,12 @@ int32_t MidiTakeover::calculateKnobPos(int32_t knobPos, int32_t ccValue, MIDIKno
 
 /// save the current midi knob position as the previous midi knob position so that it can be used next time the
 /// takeover code is executed
-void savePreviousKnobPos(int32_t knobPos, MIDIKnob* knob, bool doingMidiFollow, int32_t ccNumber) {
+void savePreviousKnobPos(int32_t knobPos, MIDIKnob* knob, bool doingMidiFollow, int32_t ccNumber, int32_t channel) {
 	if (knob != nullptr) {
 		saveKnobPos(knobPos, knob);
 	}
 	else if (doingMidiFollow) {
-		saveKnobPos(knobPos, ccNumber);
+		saveKnobPos(knobPos, channel, ccNumber);
 	}
 }
 
@@ -182,14 +182,21 @@ void saveKnobPos(int32_t knobPos, MIDIKnob* knob) {
 	knob->previousPositionSaved = true;
 }
 
+// The follow / Default-CC pickup reference is keyed by (channel, cc) - see MidiFollow::previousKnobPos. Channels
+// outside the standard range (e.g. MPE zone sentinels, MIDI_CHANNEL_NONE) fall back to row 0 rather than indexing
+// out of bounds; the per-channel separation only matters for the normal channels Default CC bindings use.
+int32_t pickupChannelRow(int32_t channel) {
+	return (channel >= 0 && channel < NUM_CHANNELS) ? channel : 0;
+}
+
 // save previous knob position if midi follow is being used
-void saveKnobPos(int32_t knobPos, int32_t ccNumber) {
-	midiFollow.previousKnobPos[ccNumber] = knobPos;
+void saveKnobPos(int32_t knobPos, int32_t channel, int32_t ccNumber) {
+	midiFollow.previousKnobPos[pickupChannelRow(channel)][ccNumber] = knobPos;
 }
 
 // returns previous knob position saved
 // checks if a previous knob position has been saved, if not, it saves current midi knob position
-int32_t getPreviousKnobPos(int32_t knobPos, MIDIKnob* knob, bool doingMidiFollow, int32_t ccNumber) {
+int32_t getPreviousKnobPos(int32_t knobPos, MIDIKnob* knob, bool doingMidiFollow, int32_t ccNumber, int32_t channel) {
 	if (knob != nullptr) {
 		if (!knob->previousPositionSaved) {
 			saveKnobPos(knobPos, knob);
@@ -197,10 +204,11 @@ int32_t getPreviousKnobPos(int32_t knobPos, MIDIKnob* knob, bool doingMidiFollow
 		return knob->previousPosition;
 	}
 	else if (doingMidiFollow) {
-		if (midiFollow.previousKnobPos[ccNumber] == kNoSelection) {
-			saveKnobPos(knobPos, ccNumber);
+		int32_t row = pickupChannelRow(channel);
+		if (midiFollow.previousKnobPos[row][ccNumber] == kNoSelection) {
+			saveKnobPos(knobPos, channel, ccNumber);
 		}
-		return midiFollow.previousKnobPos[ccNumber];
+		return midiFollow.previousKnobPos[row][ccNumber];
 	}
 	return knobPos;
 }

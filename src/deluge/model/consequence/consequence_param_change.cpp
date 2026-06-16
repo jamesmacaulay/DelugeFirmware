@@ -28,6 +28,8 @@ ConsequenceParamChange::ConsequenceParamChange(ModelStackWithAutoParam const* mo
 	memcpy(modelStackMemory, modelStack, sizeof(ModelStackWithParamId));
 
 	state.value = modelStack->autoParam->currentValue;
+	state.landscapeNodeIndex =
+	    modelStack->paramCollection->getLandscapeNodeIndexForLane(modelStack->paramId, modelStack->autoParam);
 
 	// Either steal the data...
 	if (stealData) {

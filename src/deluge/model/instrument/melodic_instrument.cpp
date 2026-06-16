@@ -66,6 +66,9 @@ void MelodicInstrument::writeMelodicInstrumentTagsToFile(Serializer& writer, Cli
 				midiInput.cable->writeReferenceToFile(writer, "inputMidiDevice");
 			}
 		}
+
+		// Default CC Input (channel + device) as a self-contained tag.
+		defaultCCMidiInput.writeChannelToFile(writer, "defaultCCInput");
 	}
 }
 
@@ -82,6 +85,10 @@ bool MelodicInstrument::readTagFromFile(Deserializer& reader, char const* tagNam
 	}
 	else if (!strcmp(tagName, "inputMidiDevice")) {
 		midiInput.cable = MIDIDeviceManager::readDeviceReferenceFromFile(reader);
+		reader.exitTag();
+	}
+	else if (!strcmp(tagName, "defaultCCInput")) {
+		defaultCCMidiInput.readChannelFromFile(reader);
 		reader.exitTag();
 	}
 	else if (Instrument::readTagFromFile(reader, tagName)) {}

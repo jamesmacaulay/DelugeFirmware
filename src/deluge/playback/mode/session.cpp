@@ -616,11 +616,12 @@ doNormalLaunch:
 					// cos this call clears any recorded-early notes
 					bool activeClipChanged = output->setActiveClip(modelStackWithTimelineCounter);
 					if (activeClipChanged) {
-						// a new clip has been launched in song view for the current output selected
-						// that new clip is now the active clip for that output
-						// send updated feedback so that midi controller has the latest values for
-						// the current clip selected for midi follow control
-						view.sendMidiFollowFeedback();
+						// A new clip has just been launched (and is now the active clip for its output) — possibly
+						// one that isn't being viewed. Feed back through the shared seam with the LAUNCHED clip, so
+						// learned knobs mirror its values to their controllers (follow still targets its own
+						// followed instrument). The viewed-context sendMidiFollowFeedback() couldn't reach an
+						// unviewed launched clip.
+						view.sendFeedbackForClip(modelStackWithTimelineCounter);
 					}
 
 					if (playbackHandler.recording == RecordingMode::ARRANGEMENT) {
@@ -925,6 +926,11 @@ void Session::userWantsToUnsoloClip(Clip* clip, bool forceLateStart, int32_t but
 	if (!hasPlaybackActive()) {
 doUnsolo:
 		unsoloClip(clip);
+
+		// Immediate unsolo (stopped, or shift-unsolo while playing) restores the activeIfNoSolo clips with no
+		// launch/doLaunch trigger — broadcast so the controller reverts to the now-active set (follow once,
+		// learned knobs per active clip). Normal unsolo while playing arms to stop -> doLaunch (already wired).
+		view.sendFeedbackForAllActiveClips();
 	}
 
 	// Or if Deluge *is* playing session...
@@ -1041,6 +1047,11 @@ void Session::toggleClipStatus(Clip* clip, int32_t* clipIndex, bool doInstant, i
 				ModelStackWithTimelineCounter* modelStackWithTimelineCounter = modelStack->addTimelineCounter(clip);
 
 				currentSong->assertActiveness(modelStackWithTimelineCounter);
+
+				// Launching a clip via its status pad while stopped makes it active immediately, with no
+				// playback-loop or view-change trigger — feed it through the shared seam so the controller
+				// tracks the now-active clip (learned knobs mirror it; follow keeps its own resolved target).
+				view.sendFeedbackForClip(modelStackWithTimelineCounter);
 
 				// Special case if doing tempoless recording elsewhere - this action stops that
 				if (playbackHandler.playbackState) {
@@ -1176,6 +1187,11 @@ void Session::soloClipAction(Clip* clip, int32_t buttonPressLatency) {
 
 			soloClipRightNow(modelStackWithTimelineCounter);
 
+			// Soloing while stopped activates this clip immediately, with no launch/doLaunch trigger — feed it
+			// through the seam so the controller tracks the now-active clip. (Playing-solo is already covered:
+			// it arms -> doLaunch, or shift-solo -> the late-start path.)
+			view.sendFeedbackForClip(modelStackWithTimelineCounter);
+
 			// Special case if doing tempoless recording elsewhere
 			if (playbackHandler.playbackState) {
 				playbackHandler.finishTempolessRecording(true, buttonPressLatency);
@@ -1237,6 +1253,12 @@ yupThatsFine:
 		ModelStack* modelStack = setupModelStackWithSong(modelStackMemory, currentSong);
 
 		armSectionWhenNeitherClockActive(modelStack, section, stopAllOtherClips);
+
+		// A plain section launch while stopped activates the section's clips immediately (multiple, across
+		// tracks) with no launch/doLaunch trigger — broadcast so the controller tracks the now-active set
+		// (follow once, learned knobs per active clip). The shift/"instant" section path already feeds back via
+		// gridToggleClipPlay -> toggleClipStatus.
+		view.sendFeedbackForAllActiveClips();
 
 		if (playbackHandler.playbackState) {
 			playbackHandler.finishTempolessRecording(true, buttonPressLatency);
@@ -1829,6 +1851,11 @@ setPosAndStuff:
 			thisClip->setPos(modelStack, modifiedStartPos);
 
 			thisClip->resumePlayback(modelStack);
+
+			// Late start (shift-launch) makes this clip active immediately, mid-loop, bypassing doLaunch's
+			// loop-boundary trigger — feed it through the seam so the controller tracks the now-active clip.
+			// Reached only by the late-start branches (regular falls through; solo jumps to setPosAndStuff).
+			view.sendFeedbackForClip(modelStack);
 
 			// If recording session to arranger, do that
 			if (playbackHandler.recording == RecordingMode::ARRANGEMENT) {
@@ -2499,6 +2526,23 @@ void Session::unsoloClip(Clip* clip) {
 	currentSong->reassessWhetherAnyClipsSoloing();
 
 	if (!hasPlaybackActive()) {
+		// When stopped, the playback re-activation loop below is skipped — but it's also what restores the
+		// active-clip pointers to the activeIfNoSolo clips. Without it, output->getActiveClip() stays stuck on
+		// the just-unsoloed clip until next playback, leaving follow/learned-knob *control* (and feedback)
+		// pointed at the wrong clip. Re-assert activeness here so the state is correct immediately. As with the
+		// sibling stopped-activation paths (toggleClipStatus / soloClipAction), this goes via
+		// assertActiveness -> setActiveClip, which can emit a Program Change (default PgmChangeSend::ONCE) but
+		// has no tick/playback side effects while stopped. Only when this was the last soloing clip.
+		if (!currentSong->getAnyClipsSoloing()) {
+			char modelStackMemory[MODEL_STACK_MAX_SIZE];
+			ModelStack* modelStack = setupModelStackWithSong(modelStackMemory, currentSong);
+			for (int32_t c = 0; c < currentSong->sessionClips.getNumElements(); c++) {
+				Clip* thisClip = currentSong->sessionClips.getClipAtIndex(c);
+				if (thisClip != clip && thisClip->activeIfNoSolo) {
+					currentSong->assertActiveness(modelStack->addTimelineCounter(thisClip));
+				}
+			}
+		}
 		return;
 	}
 

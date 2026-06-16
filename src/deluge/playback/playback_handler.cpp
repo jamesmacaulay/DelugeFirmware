@@ -567,9 +567,10 @@ void PlaybackHandler::setupPlayback(int32_t newPlaybackState, int32_t playFromPo
 	// We can only set these to -1 after calling the stuff above
 	// lastSwungTickDone = -1;
 
-	// when starting playback send updated feedback values for the current clip
-	// or active clip selected for midi follow control
-	view.sendMidiFollowFeedback();
+	// When starting playback, mirror every track's active-clip learned knobs out to their controllers (each
+	// addresses its own device), and send follow feedback once for its own target — so all controllers match
+	// the Deluge at play, not just the viewed track.
+	view.sendFeedbackForAllActiveClips();
 }
 
 void PlaybackHandler::endPlayback() {
@@ -2894,6 +2895,22 @@ void PlaybackHandler::programChangeReceived(MIDICable& cable, int32_t channel, i
 		}
 	}
 	else {
+		// Song-global section launcher: if this PC arrived on the learned "section launch PC input" source,
+		// treat its value as a section index and arm that section — exactly as if its launch pad were pressed.
+		// The channel is dedicated to section control, so we then stop (don't also offer the PC to learned
+		// global commands / section / clip triggers, which would double-fire). An out-of-range or empty
+		// section is a deliberate no-op so a stray PC can't silently stop everything.
+		if (currentSong->sectionLaunchPCInput.containsSomething()
+		    && currentSong->sectionLaunchPCInput.equalsChannelAllowMPE(&cable, channel)) {
+			if (program < kMaxNumSections && currentSong->anySessionClipsInSection(program)) {
+				if (arrangement.hasPlaybackActive()) {
+					switchToSession();
+				}
+				session.armSection(program, kMIDIKeyInputLatency);
+			}
+			return;
+		}
+
 		// we build ontop of the CC hack
 		offerNoteToLearnedThings(cable, true, channel + IS_A_PC, program);
 	}
@@ -3173,6 +3190,12 @@ void PlaybackHandler::midiCCReceived(MIDICable& cable, uint8_t channel, uint8_t 
 				// NOTE: this call may change modelStackWithTimelineCounter->timelineCounter etc!
 				thisOutput->offerReceivedCCToLearnedParams(cable, channel, ccNumber, value,
 				                                           modelStackWithTimelineCounter);
+
+				// See if the output has a "Default CC Input" binding that interprets this CC via
+				// MIDI-follow's default param map. Explicitly-learned knobs still win: the handler
+				// itself skips any CC already learned to a knob here (see hasLearnedKnobForCC), so
+				// precedence does not depend on the order of these two calls.
+				thisOutput->offerReceivedCCToDefaultMap(cable, channel, ccNumber, value, modelStackWithTimelineCounter);
 			}
 
 			thisOutput->offerReceivedCC(modelStackWithTimelineCounter, cable, channel, ccNumber, value, doingMidiThru);

@@ -27,6 +27,7 @@
 #include "io/midi/midi_device.h"
 #include "io/midi/midi_device_manager.h"
 #include "io/midi/midi_engine.h"
+#include "io/midi/midi_follow.h"
 #include "memory/general_memory_allocator.h"
 #include "model/clip/instrument_clip.h"
 #include "model/drum/drum.h"
@@ -126,6 +127,8 @@ bool Kit::writeDataToFile(Serializer& writer, Clip* clipForSavingOutputOnly, Son
 		if (midiInput.containsSomething()) {
 			midiInput.writeNoteToFile(writer, "MIDIInput");
 		}
+		// Kit-level Default CC Input (kit-global params).
+		defaultCCMidiInput.writeChannelToFile(writer, "defaultCCInput");
 	}
 	GlobalEffectableForClip::writeTagsToFile(writer, paramManager, clipForSavingOutputOnly == nullptr);
 
@@ -306,6 +309,10 @@ doReadDrum:
 		}
 		else if (!strcmp(tagName, "MIDIInput")) {
 			midiInput.readNoteFromFile(reader);
+			reader.exitTag();
+		}
+		else if (!strcmp(tagName, "defaultCCInput")) {
+			defaultCCMidiInput.readChannelFromFile(reader);
 			reader.exitTag();
 		}
 		else {
@@ -870,6 +877,61 @@ void Kit::offerReceivedCCToLearnedParams(MIDICable& cable, uint8_t channel, uint
 			if (thisDrum && thisDrum->type == DrumType::SOUND) {
 				((SoundDrum*)thisDrum)
 				    ->offerReceivedCCToLearnedParamsForClip(cable, channel, ccNumber, value, modelStack, i);
+			}
+		}
+	}
+}
+
+void Kit::offerReceivedCCToDefaultMap(MIDICable& cable, uint8_t channel, uint8_t ccNumber, uint8_t value,
+                                      ModelStackWithTimelineCounter* modelStack) {
+	if (!modelStack->timelineCounterIsSet()) {
+		return;
+	}
+
+	// Kit-level Default CC Input -> kit-global (affect-entire) params, deterministically: it does not
+	// depend on the live affect-entire state or which drum is selected.
+	if (defaultCCMidiInput.checkMatch(&cable, channel) != MIDIMatchType::NO_MATCH
+	    && !hasLearnedKnobForCC(cable, channel, ccNumber)) {
+		uint8_t globalParamId = midiFollow.ccToGlobalParam[ccNumber];
+		if (globalParamId != MidiFollow::kNoParamMapping) {
+			int32_t modPos = 0;
+			int32_t modLength = 0;
+			bool isStepEditing = false;
+			midiFollow.prepareCCRegionForParamChange(*modelStack, modPos, modLength, isStepEditing);
+			Clip* clip = (Clip*)modelStack->getTimelineCounter();
+			ModelStackWithAutoParam* modelStackWithParam =
+			    getModelStackWithParamForKit(modelStack, clip, globalParamId, params::Kind::UNPATCHED_GLOBAL, false);
+			midiFollow.setParamFromCC(modelStackWithParam, clip, ccNumber, value, modPos, modLength, isStepEditing,
+			                          channel);
+		}
+	}
+
+	// Per-drum Default CC Inputs -> that drum's params. Each drum carries its own binding, so this is
+	// deterministic and survives reordering. Mirrors the per-drum loop in offerReceivedCCToLearnedParams.
+	InstrumentClip* clip = (InstrumentClip*)modelStack->getTimelineCounter();
+	for (int32_t i = 0; i < clip->noteRows.getNumElements(); i++) {
+		Drum* thisDrum = clip->noteRows.getElement(i)->drum;
+		if (thisDrum && thisDrum->type == DrumType::SOUND) {
+			((SoundDrum*)thisDrum)->offerReceivedCCToDefaultMap(cable, channel, ccNumber, value, modelStack, i);
+		}
+	}
+}
+
+void Kit::sendLearnedKnobFeedbackForClip(ModelStackWithTimelineCounter* modelStack, bool forAutomation) {
+	// Mirrors offerReceivedCCToLearnedParams' structure (kit-global + per-drum), but for *output* feedback.
+
+	// Kit-global (affect-entire) learned knobs.
+	if (ModControllable* modControllable = toModControllable()) {
+		modControllable->sendLearnedKnobFeedbackForClip(modelStack, -1, forAutomation);
+	}
+
+	// Each NoteRow / Drum's own learned knobs.
+	if (modelStack->timelineCounterIsSet()) {
+		InstrumentClip* clip = (InstrumentClip*)modelStack->getTimelineCounter();
+		for (int32_t i = 0; i < clip->noteRows.getNumElements(); i++) {
+			Drum* thisDrum = clip->noteRows.getElement(i)->drum;
+			if (thisDrum && thisDrum->type == DrumType::SOUND) {
+				((SoundDrum*)thisDrum)->sendLearnedKnobFeedbackForClip(modelStack, i, forAutomation);
 			}
 		}
 	}

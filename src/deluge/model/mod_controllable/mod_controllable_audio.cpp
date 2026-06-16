@@ -30,6 +30,7 @@
 #include "io/debug/log.h"
 #include "io/midi/midi_device.h"
 #include "io/midi/midi_engine.h"
+#include "io/midi/midi_feedback_working_set.h"
 #include "io/midi/midi_takeover.h"
 #include "mem_functions.h"
 #include "model/clip/audio_clip.h"
@@ -490,6 +491,11 @@ void ModControllableAudio::writeParamAttributesToFile(Serializer& writer, ParamM
                                                       bool writeAutomation, int32_t* valuesForOverride) {
 	UnpatchedParamSet* unpatchedParams = paramManager->getUnpatchedParamSet();
 
+	// Transformation spaces travel with automation (song contexts), never with presets.
+	if (writeAutomation) {
+		unpatchedParams->writeLandscapesAsAttribute(writer, "unpatchedParamLandscapes");
+	}
+
 	unpatchedParams->writeParamAsAttribute(writer, "stutterRate", params::UNPATCHED_STUTTER_RATE, writeAutomation,
 	                                       false, valuesForOverride);
 	unpatchedParams->writeParamAsAttribute(writer, "sampleRateReduction", params::UNPATCHED_SAMPLE_RATE_REDUCTION,
@@ -554,7 +560,11 @@ bool ModControllableAudio::readParamTagFromFile(Deserializer& reader, char const
 	ParamCollectionSummary* unpatchedParamsSummary = paramManager->getUnpatchedParamSetSummary();
 	UnpatchedParamSet* unpatchedParams = (UnpatchedParamSet*)unpatchedParamsSummary->paramCollection;
 
-	if (!strcmp(tagName, "equalizer")) {
+	if (!strcmp(tagName, "unpatchedParamLandscapes")) {
+		unpatchedParams->readLandscapes(reader, unpatchedParamsSummary);
+		reader.exitTag("unpatchedParamLandscapes");
+	}
+	else if (!strcmp(tagName, "equalizer")) {
 		reader.match('{');
 		while (*(tagName = reader.readNextTagOrAttributeName())) {
 			if (!strcmp(tagName, "bass")) {
@@ -1049,6 +1059,85 @@ ModelStackWithThreeMainThings* ModControllableAudio::addNoteRowIndexAndStuff(Mod
 	return modelStackWithThreeMainThings;
 }
 
+void ModControllableAudio::sendLearnedKnobFeedback(ModelStackWithThreeMainThings* modelStack,
+                                                   ModelStackWithAutoParam* editedParam, bool forAutomation) {
+	// Per-edit echo (editedParam set) / context-sync (editedParam null) / per-tick automation mirror
+	// (forAutomation). The caller (View) gates on the MidiInputAutoFeedback flag and clip context.
+	// Loop-safety: an echoed value re-enters learned-knob input as a CC equal to the current value, which the
+	// value-equality no-op in offerReceivedCCToLearnedParamsForClip/ForSong drops (no change -> no re-echo),
+	// so no extra guard is needed here.
+	for (MIDIKnob& knob : midi_knobs) {
+		ModelStackWithAutoParam* knobParam = getParamFromMIDIKnob(knob, modelStack);
+		if (!knobParam || !knobParam->autoParam) {
+			continue;
+		}
+		// Per-edit echo: only the knob bound to the param that just changed. Pointer-equality of the resolved
+		// AutoParam is exact and needs no paramDescriptor math; it also naturally skips edits to params no
+		// learned knob is bound to (e.g. patched params, since learned knobs resolve as unpatched).
+		if (editedParam && knobParam->autoParam != editedParam->autoParam) {
+			continue;
+		}
+		// Per-tick automation mirror: bound to params that are actually automated AND in the recently-touched
+		// working set, so it tracks the controls you're working with without flooding the bus every tick.
+		if (forAutomation) {
+			if (!knobParam->autoParam->isAutomated()) {
+				continue;
+			}
+			if (!midiFeedbackWorkingSet.isTouched(this, knobParam->paramCollection->getParamKind(),
+			                                      knobParam->paramId)) {
+				continue;
+			}
+		}
+		// Mirror the value the knob actually drives: for a landscape param that's the INDEX, not
+		// getCurrentValue()'s transformed output. Matches the takeover path below and midi_follow's
+		// CC feedback (getValuePossiblyAtPos(-1)); for non-landscape params it's identical to getCurrentValue().
+		int32_t knobPos = knobParam->paramCollection->paramValueToKnobPos(
+		    knobParam->autoParam->getValuePossiblyAtPos(-1, knobParam), knobParam);
+		sendLearnedKnobFeedbackToController(knob, knobPos);
+	}
+}
+
+void ModControllableAudio::sendLearnedKnobFeedbackForClip(ModelStackWithTimelineCounter* modelStack,
+                                                          int32_t noteRowIndex, bool forAutomation) {
+	// Build this mod-controllable's "three main things" for the given clip (mirroring the learned-knob *input*
+	// path's addNoteRowIndexAndStuff), then sync its learned knobs. Unlike the View-hook path this doesn't read
+	// activeModControllableModelStack, so it works for a clip that isn't the one being viewed. forAutomation
+	// limits the send to automated params that are in the recently-touched working set (the per-tick mirror).
+	ModelStackWithThreeMainThings* modelStackWithThreeMainThings = addNoteRowIndexAndStuff(modelStack, noteRowIndex);
+	sendLearnedKnobFeedback(modelStackWithThreeMainThings, nullptr, forAutomation);
+}
+
+void ModControllableAudio::sendLearnedKnobFeedbackToController(MIDIKnob& knob, int32_t knobPos) {
+	// Relative encoders have no absolute position to show or seek.
+	if (knob.relative) {
+		return;
+	}
+	// 14-bit / pitch-bend-learned knobs use noteOrCC == 128 as a sentinel; we can't echo them as a 7-bit CC
+	// (sending noteOrCC would emit a malformed CC number 128). The input path matches these via a separate
+	// pitch-bend handler, never as a CC — mirror that by skipping them here rather than emitting a corrupt
+	// byte. (Pitch-bend-to-param learning is deprecated post-4.0; this just keeps legacy configs safe.)
+	if (knob.is14Bit()) {
+		return;
+	}
+	// Only send device-specifically. A null cable means the knob was learned device-agnostically
+	// (differentiate-inputs-by-device off); skip rather than broadcast to every output (which could fan a
+	// DIN chain out to unrelated gear).
+	MIDICable* cable = knob.midiInput.cable;
+	if (cable == nullptr) {
+		return;
+	}
+	int32_t channel = knob.midiInput.isForMPEZone() ? knob.midiInput.getMasterChannel() : knob.midiInput.channelOrZone;
+
+	// knobPos is [-64, 64]; a CC value is [0, 127], mirroring MidiTakeover's (ccValue - 64) input mapping.
+	// Clamp the top (knobPos 64 -> 128) ourselves since the direct cable send doesn't clamp like
+	// MidiEngine::sendCC does.
+	int32_t ccValue = knobPos + kKnobPosOffset;
+	if (ccValue > kMaxMIDIValue) {
+		ccValue = kMaxMIDIValue;
+	}
+	cable->sendCC(channel, knob.midiInput.noteOrCC, ccValue);
+}
+
 bool ModControllableAudio::offerReceivedCCToLearnedParamsForClip(MIDICable& cable, uint8_t channel, uint8_t ccNumber,
                                                                  uint8_t value,
                                                                  ModelStackWithTimelineCounter* modelStack,
@@ -1103,7 +1192,10 @@ bool ModControllableAudio::offerReceivedCCToLearnedParamsForClip(MIDICable& cabl
 					currentValue = modelStackWithParam->autoParam->getValuePossiblyAtPos(modPos, modelStackWithParam);
 				}
 				else {
-					currentValue = modelStackWithParam->autoParam->getCurrentValue();
+					// Index-space reference: with a landscape the learned knob drives the INDEX, so
+					// takeover must compare against the index, not getCurrentValue()'s transformed output
+					// (wrong space → takeover jumps or never engages). Same idiom as the gold knob.
+					currentValue = modelStackWithParam->autoParam->getValuePossiblyAtPos(-1, modelStackWithParam);
 				}
 
 				// convert current value to knobPos to compare to cc value being received
@@ -1127,6 +1219,12 @@ bool ModControllableAudio::offerReceivedCCToLearnedParamsForClip(MIDICable& cabl
 				modelStackWithParam->autoParam->setValuePossiblyForRegion(newValue, modelStackWithParam, modPos,
 				                                                          modLength);
 
+				// Controller-side touch: warm this param in the shared feedback working set (A3) so the other
+				// feedback consumers will mirror it.
+				midiFeedbackWorkingSet.recordTouch(modelStackWithParam->modControllable,
+				                                   modelStackWithParam->paramCollection->getParamKind(),
+				                                   modelStackWithParam->paramId);
+
 				// if you're in automation view and editing the same parameter that was just updated
 				// by a learned midi knob, then re-render the pads on the automation editor grid
 				if (getRootUI() == &automationView && !automationView.onArrangerView) {
@@ -1145,6 +1243,15 @@ bool ModControllableAudio::offerReceivedCCToLearnedParamsForClip(MIDICable& cabl
 		}
 	}
 	return messageUsed;
+}
+
+bool ModControllableAudio::hasLearnedKnobForCC(MIDICable& cable, uint8_t channel, uint8_t ccNumber) {
+	for (MIDIKnob& knob : midi_knobs) {
+		if (knob.midiInput.equalsNoteOrCC(&cable, channel, ccNumber)) {
+			return true;
+		}
+	}
+	return false;
 }
 
 bool ModControllableAudio::offerReceivedCCToLearnedParamsForSong(
@@ -1193,7 +1300,10 @@ bool ModControllableAudio::offerReceivedCCToLearnedParamsForSong(
 					currentValue = modelStackWithParam->autoParam->getValuePossiblyAtPos(modPos, modelStackWithParam);
 				}
 				else {
-					currentValue = modelStackWithParam->autoParam->getCurrentValue();
+					// Index-space reference: with a landscape the learned knob drives the INDEX, so
+					// takeover must compare against the index, not getCurrentValue()'s transformed output
+					// (wrong space → takeover jumps or never engages). Same idiom as the gold knob.
+					currentValue = modelStackWithParam->autoParam->getValuePossiblyAtPos(-1, modelStackWithParam);
 				}
 
 				// convert current value to knobPos to compare to cc value being received

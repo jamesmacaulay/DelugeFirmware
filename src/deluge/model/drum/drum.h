@@ -63,6 +63,11 @@ public:
 
 	LearnedMIDI midiInput;
 	LearnedMIDI muteMIDICommand;
+	// Per-drum "Default CC Input": CCs on this device+channel are interpreted via MIDI-follow's default
+	// CC->param map and applied to this drum's params. Lets a kit row be controlled by a controller
+	// channel deterministically (tied to the drum, not to its position or the current selection).
+	// Per-song binding like midiInput; presence (channelOrZone != MIDI_CHANNEL_NONE) is the on/off.
+	LearnedMIDI defaultCCMidiInput;
 
 	ArpeggiatorForDrum arpeggiator;
 	ArpeggiatorSettings arpSettings;
