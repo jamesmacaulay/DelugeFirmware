@@ -66,6 +66,7 @@ public:
 	                                    ModelStackWithTimelineCounter* modelStack) override;
 	void offerReceivedCCToDefaultMap(MIDICable& cable, uint8_t channel, uint8_t ccNumber, uint8_t value,
 	                                 ModelStackWithTimelineCounter* modelStack) override;
+	void sendLearnedKnobFeedbackForClip(ModelStackWithTimelineCounter* modelStack, bool forAutomation = false) override;
 
 	void offerReceivedPitchBend(ModelStackWithTimelineCounter* modelStackWithTimelineCounter, MIDICable& cable,
 	                            uint8_t channel, uint8_t data1, uint8_t data2, bool* doingMidiThru) override;

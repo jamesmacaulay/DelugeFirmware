@@ -93,6 +93,10 @@ public:
 	bool hasBassAdjusted(ParamManager* paramManager);
 	bool hasTrebleAdjusted(ParamManager* paramManager);
 	ModelStackWithAutoParam* getParamFromMIDIKnob(MIDIKnob& knob, ModelStackWithThreeMainThings* modelStack) override;
+	void sendLearnedKnobFeedback(ModelStackWithThreeMainThings* modelStack, ModelStackWithAutoParam* editedParam,
+	                             bool forAutomation = false) override;
+	void sendLearnedKnobFeedbackForClip(ModelStackWithTimelineCounter* modelStack, int32_t noteRowIndex,
+	                                    bool forAutomation = false) override;
 
 	// EQ
 	int32_t bassFreq{}; // These two should eventually not be variables like this
@@ -178,6 +182,10 @@ private:
 	void doEQ(bool doBass, bool doTreble, int32_t* inputL, int32_t* inputR, int32_t bassAmount, int32_t trebleAmount);
 	void switchHPFModeWithOff();
 	void switchLPFModeWithOff();
+
+	// Low-level send for sendLearnedKnobFeedback(): emit one knob's value to the controller it's bound to.
+	// Skips relative encoders and device-agnostic knobs (null cable — avoids broadcasting/fanning out).
+	void sendLearnedKnobFeedbackToController(MIDIKnob& knob, int32_t knobPos);
 
 	void processGrainFX(std::span<StereoSample> buffer, int32_t modFXRate, int32_t modFXDepth, int32_t* postFXVolume,
 	                    UnpatchedParamSet* unpatchedParams, bool anySoundComingIn, q31_t verbAmount);

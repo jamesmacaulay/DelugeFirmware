@@ -152,6 +152,10 @@ public:
 	/// A TimelineCounter is required.
 	virtual void offerReceivedCCToDefaultMap(MIDICable& cable, uint8_t channel, uint8_t ccNumber, uint8_t value,
 	                                         ModelStackWithTimelineCounter* modelStack) {}
+	/// Context-sync this output's learned-knob values out to their controllers for the given clip (the inverse
+	/// of offerReceivedCCToLearnedParams). Base handles a single-instrument output (synth/MIDI/CV); Kit
+	/// overrides to cover kit-global + each drum. Used to mirror a clip cue-launched while unviewed.
+	virtual void sendLearnedKnobFeedbackForClip(ModelStackWithTimelineCounter* modelStack, bool forAutomation = false);
 	virtual int32_t doTickForwardForArp(ModelStack* modelStack, int32_t currentPos) { return 2147483647; }
 	void endAnyArrangementRecording(Song* song, int32_t actualEndPos, uint32_t timeRemainder);
 	virtual bool wantsToBeginArrangementRecording() { return armedForRecording; }
