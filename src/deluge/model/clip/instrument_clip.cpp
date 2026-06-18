@@ -37,6 +37,7 @@
 #include "model/instrument/midi_instrument.h"
 #include "model/iterance/iterance.h"
 #include "model/note/note.h"
+#include "model/note/note_landscape.h"
 #include "model/output.h"
 #include "model/scale/note_set.h"
 #include "model/scale/preset_scales.h"
@@ -46,6 +47,9 @@
 #include "modulation/arpeggiator.h"
 #include "modulation/midi/midi_param.h"
 #include "modulation/midi/midi_param_collection.h"
+#include "modulation/params/param.h"
+#include "modulation/params/param_manager.h"
+#include "modulation/params/param_set.h"
 #include "modulation/patch/patch_cable_set.h"
 #include "processing/engines/audio_engine.h"
 #include "processing/engines/cv_engine.h"
@@ -107,6 +111,48 @@ InstrumentClip::~InstrumentClip() {
 	// That's ok. Whereas, for AudioClips, it's made sure that all linear recording is stopped first
 
 	deleteBackedUpParamManagerMIDI();
+
+	if (noteLandscape) {
+		noteLandscape->~NoteLandscape();
+		delugeDealloc(noteLandscape);
+		noteLandscape = nullptr;
+	}
+}
+
+NoteLandscape* InstrumentClip::getOrCreateNoteLandscape() {
+	if (!noteLandscape) {
+		void* mem = GeneralMemoryAllocator::get().allocLowSpeed(sizeof(NoteLandscape));
+		if (mem) {
+			noteLandscape = new (mem) NoteLandscape();
+		}
+	}
+	return noteLandscape;
+}
+
+// The index lives in the SHARED unpatched param range, so it exists in BOTH a synth clip's SOUND
+// set and a kit clip's GLOBAL set. Gate by OUTPUT TYPE (synth/kit) — MIDI/CV clips have no unpatched
+// set (summaries[0] is a different collection), so we must NOT call getUnpatchedParamSet() there;
+// they fall back to the engine's own currentIndex (knob-driven, no index automation).
+bool InstrumentClip::hasNoteLandscapeIndexParam() {
+	return output && (output->type == OutputType::SYNTH || output->type == OutputType::KIT);
+}
+
+int32_t InstrumentClip::getNoteLandscapeIndexFromParam() {
+	if (!hasNoteLandscapeIndexParam()) {
+		return -1;
+	}
+	int32_t pv =
+	    paramManager.getUnpatchedParamSet()->getValue(deluge::modulation::params::UNPATCHED_NOTE_LANDSCAPE_INDEX);
+	return noteLandscapeParamToIndex(pv);
+}
+
+void InstrumentClip::setNoteLandscapeIndexParam(int32_t index) {
+	if (!hasNoteLandscapeIndexParam()) {
+		return;
+	}
+	paramManager.getUnpatchedParamSet()
+	    ->params[deluge::modulation::params::UNPATCHED_NOTE_LANDSCAPE_INDEX]
+	    .setCurrentValueBasicForSetup(noteLandscapeIndexToParam(index));
 }
 
 void InstrumentClip::deleteBackedUpParamManagerMIDI() {
@@ -179,6 +225,14 @@ deleteClipAndGetOut:
 	if (!newClip->noteRows.cloneFrom(&noteRows)) {
 		error = Error::INSUFFICIENT_RAM;
 		goto deleteClipAndGetOut;
+	}
+
+	// Deep-copy the Note Landscape (saved patterns + index) so a duplicated clip keeps its patterns.
+	if (noteLandscape && noteLandscape->hasAnyPatterns()) {
+		NoteLandscape* nl = newClip->getOrCreateNoteLandscape();
+		if (nl) {
+			nl->cloneFrom(noteLandscape);
+		}
 	}
 
 	modelStack->setTimelineCounter(newClip);
@@ -692,6 +746,65 @@ void InstrumentClip::processCurrentPos(ModelStackWithTimelineCounter* modelStack
 	if (modelStack->getTimelineCounter() != this) {
 		return; // Is this in case it's created a new Clip or something?
 	}
+
+	// Note Landscape: every tick, pull the morph index from its automatable param (so timeline
+	// automation / MIDI drive the morph MID-LOOP, like the knob does) and realize. realize()
+	// self-gates on the quantized morph state, so this is cheap when nothing changed, and only the
+	// rows whose notes actually change are touched (surviving notes aren't cut).
+	if (noteLandscape && noteLandscape->hasAnyPatterns()) {
+		int32_t paramIndex = getNoteLandscapeIndexFromParam();
+		if (paramIndex >= 0) {
+			noteLandscape->currentIndex = paramIndex;
+		}
+		if (noteLandscape->editingSlot >= 0) {
+			// A pattern is loaded for editing: keep the PLAYED morph following the index in the shadow
+			// (swapped in below), while the grid stays on the edited pattern. No re-render — the grid
+			// shows the pattern, which the morph mustn't disturb.
+			noteLandscape->realizeIntoShadow(modelStack);
+		}
+		else {
+			// If the index param is AUTOMATED, bake the per-position morph (static grid, identical
+			// playback) instead of the live single-index morph (which would flicker every tick).
+			AutoParam* indexParam = nullptr;
+			if (hasNoteLandscapeIndexParam()) {
+				indexParam = &paramManager.getUnpatchedParamSet()
+				                  ->params[deluge::modulation::params::UNPATCHED_NOTE_LANDSCAPE_INDEX];
+			}
+			bool changed = (indexParam && indexParam->isAutomated())
+			                   ? noteLandscape->realizeAutomatedOutput(modelStack, indexParam)
+			                   : noteLandscape->realize(modelStack);
+			if (changed) {
+				// Morph changed the notes mid-playback — re-render the grid if this clip is on-screen.
+				RootUI* rootUI = getRootUI();
+				if (rootUI) {
+					rootUI->clipNeedsReRendering(this);
+				}
+			}
+		}
+	}
+
+	// Note Landscape: while a saved pattern is loaded for editing, the live rows hold the EDITABLE
+	// pattern (so all normal note editing/rendering works). Playback must still sound the MORPH — so
+	// swap the frozen morph snapshot into the rows for just this tick's note scan, then restore the
+	// edited notes. Single-threaded, so the UI never sees the morph and playback never sees the edits.
+	// The scratch is function-static (clips process sequentially, never nested) to keep it off the
+	// audio-path stack; the RAII guard restores on every exit path.
+	static NoteLandscape::MorphSwap noteLandscapeMorphSwap;
+	struct MorphPlaybackSwap {
+		InstrumentClip* clip;
+		bool active = false;
+		explicit MorphPlaybackSwap(InstrumentClip* c) : clip(c) {
+			if (c->noteLandscape && c->noteLandscape->editingSlot >= 0) {
+				c->noteLandscape->swapInMorph(c, noteLandscapeMorphSwap);
+				active = true;
+			}
+		}
+		~MorphPlaybackSwap() {
+			if (active) {
+				clip->noteLandscape->swapOutMorph(clip, noteLandscapeMorphSwap);
+			}
+		}
+	} morphPlaybackSwap(this);
 
 	// We already incremented / decremented noteRowsNumTicksBehindClip and ticksTilNextNoteRowEvent, in the call to
 	// incrementPos().
@@ -2425,6 +2538,12 @@ void InstrumentClip::writeDataToFile(Serializer& writer, Song* song) {
 
 		writer.writeArrayEnding("noteRows");
 	}
+
+	// Note Landscapes are song-only (like the notes themselves), so they ride along in the clip's
+	// song data and are never baked into a preset.
+	if (noteLandscape) {
+		noteLandscape->writeToFile(writer);
+	}
 }
 
 Error InstrumentClip::readFromFile(Deserializer& reader, Song* song) {
@@ -2820,6 +2939,13 @@ createNewParamManager:
 				reader.exitTag(nullptr, true); // leave box.
 			}
 			reader.match(']');
+		}
+
+		else if (!strcmp(tagName, "noteLandscape")) {
+			NoteLandscape* nl = getOrCreateNoteLandscape();
+			if (nl) {
+				nl->readFromFile(reader);
+			}
 		}
 
 		// These are the expression params for MPE

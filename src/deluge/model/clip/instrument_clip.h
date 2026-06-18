@@ -40,6 +40,7 @@ class TimelineView;
 class ModelStackWithTimelineCounter;
 class ModelStackWithModControllable;
 class ModelStackWithNoteRow;
+class NoteLandscape;
 
 struct PendingNoteOn;
 
@@ -117,6 +118,18 @@ public:
 	                              // capture and store this
 
 	NoteRowVector noteRows;
+
+	/// Note Landscapes: per-clip morph between saved note patterns, driven by an index value.
+	/// Song-only; nullptr until the user captures their first pattern. Owned.
+	NoteLandscape* noteLandscape = nullptr;
+	/// Lazily allocate the landscape; returns nullptr only on out-of-memory.
+	NoteLandscape* getOrCreateNoteLandscape();
+	/// The morph index, sourced from the automatable UNPATCHED_NOTE_LANDSCAPE_INDEX param. Read
+	/// returns -1 if this clip has no main param collection (e.g. MIDI/CV) — fall back to the
+	/// engine's own currentIndex then. Write mirrors a knob/pattern move into the param.
+	bool hasNoteLandscapeIndexParam(); // true only for synth/kit (have the shared unpatched param)
+	int32_t getNoteLandscapeIndexFromParam();
+	void setNoteLandscapeIndexParam(int32_t index);
 
 	bool wrapEditing;
 	uint32_t wrapEditLevel{};
