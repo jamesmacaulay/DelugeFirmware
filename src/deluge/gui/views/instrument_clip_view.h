@@ -210,6 +210,28 @@ public:
 	void reportNoteOffForMPEEditing(ModelStackWithNoteRow* modelStack);
 	void dontDeleteNotesOnDepress();
 
+	// Note Landscapes: pattern-morph mode (entered with SHIFT + CROSS-SCREEN).
+	bool noteLandscapeMode = false;
+	int32_t noteLandscapeView = -1;      // which lane the sidebar highlights: -1 output, -2 index, >=0 pattern slot
+	int32_t noteLandscapeReposSlot = -1; // a left pattern pad is held → the gold knob repositions this slot
+	void toggleNoteLandscapeMode();
+	// Select which lane the note grid shows/edits (mirrors Param Landscape's applyLandscapeLaneView):
+	// -1 output (read-only morph), -2 index (jump to Automation View on the index param), >=0 a saved
+	// pattern (loaded into the clip's notes, editable). Commits any pattern previously being edited.
+	void selectNoteLandscapeLane(int32_t lane);
+	ActionResult noteLandscapeSidebarPadAction(int32_t x, int32_t y);
+	// After a grid edit while a pattern is selected, fold the live notes back into that pattern's
+	// storage and invalidate the morph, so the PLAYED morph reflects the edit immediately (the grid
+	// stays on the pattern). Cheap, main-loop only.
+	void commitNoteLandscapeEdit();
+	void noteLandscapeReposPadReleased();
+	void captureNoteLandscapeAt(int32_t position);
+	void noteLandscapeAdjustIndex(int32_t whichModEncoder, int32_t offset);
+	void noteLandscapeMoveIndexTo(int32_t newIndex);
+	void realizeNoteLandscapeNow();
+	bool renderNoteLandscapeSidebar(uint32_t whichRows, RGB image[][kDisplayWidth + kSideBarWidth],
+	                                uint8_t occupancyMask[][kDisplayWidth + kSideBarWidth]);
+
 	// tempo encoder commands
 	void tempoEncoderAction(int8_t offset, bool encoderButtonPressed, bool shiftButtonPressed);
 	ActionResult commandStopQuantize(int32_t y);

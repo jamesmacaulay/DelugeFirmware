@@ -209,6 +209,10 @@ public:
 	void applyLandscapeLaneView(ModelStackWithAutoParam* modelStackWithParam);
 	/// Toggle transform mode (CROSS SCREEN in the automation editor; LED shows the mode).
 	void toggleLandscapeTransformMode();
+	/// True when the automation editor is showing the Note Landscape index param — that param's
+	/// "landscape" is the Note Landscape feature (not the scalar Param Landscape), so CROSS SCREEN and
+	/// the sidebar route to the Note Landscape UI (hosted by instrumentClipView) instead.
+	bool isNoteLandscapeIndexParamSelected();
 
 	// public so instrument clip view can access it
 	void initParameterSelection(bool updateDisplay = true);

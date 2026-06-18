@@ -128,8 +128,8 @@ const uint32_t mutePadActionUIModes[] = {UI_MODE_NOTES_PRESSED, UI_MODE_AUDITION
 
 const uint32_t verticalScrollUIModes[] = {UI_MODE_NOTES_PRESSED, UI_MODE_AUDITIONING, UI_MODE_RECORD_COUNT_IN, 0};
 
-constexpr int32_t kNumNonGlobalParamsForAutomation = 83;
-constexpr int32_t kNumGlobalParamsForAutomation = 39;
+constexpr int32_t kNumNonGlobalParamsForAutomation = 84;
+constexpr int32_t kNumGlobalParamsForAutomation = 40;
 
 // synth and kit rows FX - sorted in the order that Parameters are scrolled through on the display
 const std::array<std::pair<params::Kind, ParamType>, kNumNonGlobalParamsForAutomation> nonGlobalParamsForAutomation{{
@@ -237,6 +237,8 @@ const std::array<std::pair<params::Kind, ParamType>, kNumNonGlobalParamsForAutom
     {params::Kind::PATCHED, params::LOCAL_NOISE_VOLUME},
     // Portamento
     {params::Kind::UNPATCHED_SOUND, params::UNPATCHED_PORTAMENTO},
+    // Note Landscape morph index
+    {params::Kind::UNPATCHED_SOUND, params::UNPATCHED_NOTE_LANDSCAPE_INDEX},
     // Stutter Rate
     {params::Kind::UNPATCHED_SOUND, params::UNPATCHED_STUTTER_RATE},
     // Compressor Threshold
@@ -288,6 +290,8 @@ const std::array<std::pair<params::Kind, ParamType>, kNumGlobalParamsForAutomati
     {params::Kind::UNPATCHED_GLOBAL, params::UNPATCHED_MOD_FX_RATE},
     // Stutter Rate
     {params::Kind::UNPATCHED_GLOBAL, params::UNPATCHED_STUTTER_RATE},
+    // Note Landscape morph index
+    {params::Kind::UNPATCHED_GLOBAL, params::UNPATCHED_NOTE_LANDSCAPE_INDEX},
     // Compressor Threshold
     {params::Kind::UNPATCHED_GLOBAL, params::UNPATCHED_COMPRESSOR_THRESHOLD},
     // Arp Rate, Gate, Rhythm, Chord Polyphony, Sequence Length, Ratchet Amount, Note Prob, Bass Prob, Chord Prob,
@@ -970,6 +974,13 @@ bool AutomationView::renderSidebar(uint32_t whichRows, RGB image[][kDisplayWidth
 
 	bool rendered = getCurrentClip()->renderSidebar(whichRows, image, occupancyMask);
 
+	// Note Landscape index param: its landscape IS Note Landscape, so render the Note Landscape
+	// sidebars (lane selectors + saved-pattern map) hosted by instrumentClipView, not the scalar
+	// Param Landscape ones below.
+	if (instrumentClipView.noteLandscapeMode && isNoteLandscapeIndexParamSelected()) {
+		return instrumentClipView.renderNoteLandscapeSidebar(whichRows, image, occupancyMask);
+	}
+
 	// Transform mode sidebars. LEFT column = lane slots: index pad (blue) on top, output pad
 	// (violet) below it, then saved positions stacked from the bottom, coloured green->red by
 	// their knob position; the viewed lane's pad is white. RIGHT column = knob-travel map:
@@ -1324,6 +1335,19 @@ ActionResult AutomationView::buttonAction(hid::Button b, bool on, bool inCardRou
 		// toggle auto scroll or cross screen editing
 		if (onArrangerView || inNoteEditor()) {
 			handleCrossScreenButtonAction(on);
+		}
+		// Automation editor on the Note Landscape index param: its "landscape" IS Note Landscape, so
+		// CROSS SCREEN toggles the Note Landscape UI (hosted by instrumentClipView) rather than the
+		// scalar Param Landscape transform mode.
+		else if (inAutomationEditor() && isNoteLandscapeIndexParamSelected()) {
+			if (on) {
+				if (landscapeTransformMode) {
+					toggleLandscapeTransformMode(); // never both at once
+				}
+				instrumentClipView.toggleNoteLandscapeMode();
+				renderDisplay();
+				uiNeedsRendering(&automationView);
+			}
 		}
 		// Automation editor: CROSS SCREEN toggles transform mode (it was explicitly unused
 		// here, and unlike the old left-encoder push it can't nudge the param audibly).
@@ -1860,6 +1884,23 @@ ActionResult AutomationView::padAction(int32_t x, int32_t y, int32_t velocity) {
 	// taps cycle onto each save in the row. Gap pads do nothing (and defuse the held dialog).
 	// Releasing a left-column slot pad ends any pad-held reposition gesture (the held flag drives
 	// the knob roles in modEncoderAction).
+	// Note Landscape index param: route both sidebar columns to the Note Landscape handler (hosted by
+	// instrumentClipView) instead of the Param Landscape sidebar below.
+	if (!onArrangerView && x >= kDisplayWidth && instrumentClipView.noteLandscapeMode
+	    && isNoteLandscapeIndexParamSelected()) {
+		if (velocity) {
+			ActionResult r = instrumentClipView.noteLandscapeSidebarPadAction(x, y);
+			uiNeedsRendering(&automationView);
+			return r;
+		}
+		// Releasing a left-column slot pad (pattern or index) ends the reposition hold.
+		if (x == kDisplayWidth && instrumentClipView.noteLandscapeReposSlot != -1) {
+			instrumentClipView.noteLandscapeReposPadReleased();
+			uiNeedsRendering(&automationView);
+		}
+		return ActionResult::DEALT_WITH;
+	}
+
 	if (!onArrangerView && x == kDisplayWidth && !velocity && inAutomationEditor() && landscapeTransformMode) {
 		landscapeReposPadHeld = false;
 	}
@@ -2951,6 +2992,15 @@ void AutomationView::potentiallyVerticalScrollToSelectedDrum(InstrumentClip* cli
 // used to record live automations in
 void AutomationView::modEncoderAction(int32_t whichModEncoder, int32_t offset) {
 
+	// Note Landscape index lane: while the index pad is held (reposSlot == -2), the LEFT knob does the
+	// neutral index drag (carry a parked pattern); the RIGHT knob is the plain scrub handled below as a
+	// normal param adjust. Reuse the note-grid logic so behaviour matches across views.
+	if (instrumentClipView.noteLandscapeMode && instrumentClipView.noteLandscapeReposSlot == -2 && whichModEncoder == 0
+	    && isNoteLandscapeIndexParamSelected()) {
+		instrumentClipView.noteLandscapeAdjustIndex(whichModEncoder, offset);
+		return;
+	}
+
 	char modelStackMemory[MODEL_STACK_MAX_SIZE];
 	ModelStackWithTimelineCounter* modelStackWithTimelineCounter = nullptr;
 	ModelStackWithThreeMainThings* modelStackWithThreeMainThings = nullptr;
@@ -3767,6 +3817,19 @@ static void addLandscapeChangeConsequence(Action* action, ModelStackWithAutoPara
 static void snapshotLandscapeForDrag(ModelStackWithAutoParam const* modelStackWithParam) {
 	addLandscapeChangeConsequence(actionLogger.getNewAction(ActionType::LANDSCAPE_CHANGE, ActionAddition::ALLOWED),
 	                              modelStackWithParam);
+}
+
+bool AutomationView::isNoteLandscapeIndexParamSelected() {
+	if (onArrangerView || !inAutomationEditor()) {
+		return false;
+	}
+	Clip* clip = getCurrentClip();
+	if (!clip) {
+		return false;
+	}
+	return clip->lastSelectedParamID == params::UNPATCHED_NOTE_LANDSCAPE_INDEX
+	       && (clip->lastSelectedParamKind == params::Kind::UNPATCHED_SOUND
+	           || clip->lastSelectedParamKind == params::Kind::UNPATCHED_GLOBAL);
 }
 
 void AutomationView::toggleLandscapeTransformMode() {

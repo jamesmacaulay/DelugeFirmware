@@ -268,10 +268,11 @@ void sortLedsForCol(int32_t x) {
 	PIC::setColourForTwoColumns((x >> 1), doubleColumn);
 }
 
-const RGB flashColours[3] = {
+const RGB flashColours[4] = {
     {130, 120, 130},
     gui::colours::muted, // Not used anymore
     gui::colours::red,
+    {44, 40, 44}, // Dim — Note Landscape: previewing/editing a pattern that ISN'T what's playing
 };
 
 RGB prepareColour(int32_t x, int32_t y, RGB colourSource) {

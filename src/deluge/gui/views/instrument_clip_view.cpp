@@ -68,6 +68,7 @@
 #include "model/model_stack.h"
 #include "model/note/copied_note_row.h"
 #include "model/note/note.h"
+#include "model/note/note_landscape.h"
 #include "model/note/note_row.h"
 #include "model/scale/utils.h"
 #include "model/settings/runtime_feature_settings.h"
@@ -251,6 +252,17 @@ ActionResult InstrumentClipView::commandExitScaleMode() {
 
 ActionResult InstrumentClipView::buttonAction(deluge::hid::Button b, bool on, bool inCardRoutine) {
 	using namespace deluge::hid::button;
+
+	// Note Landscape: SHIFT + CROSS-SCREEN toggles note-landscape (pattern-morph) mode.
+	if (b == CROSS_SCREEN_EDIT && on && Buttons::isShiftButtonPressed()) {
+		if (inCardRoutine) {
+			return ActionResult::REMIND_ME_OUTSIDE_CARD_ROUTINE;
+		}
+		toggleNoteLandscapeMode();
+		// Suppress the wrap-edit toggle that would otherwise fire on CROSS-SCREEN release.
+		Buttons::considerCrossScreenReleaseForCrossScreenMode = false;
+		return ActionResult::DEALT_WITH;
+	}
 
 	// Scale mode button
 	if (b == SCALE_MODE && currentUIMode != UI_MODE_HOLDING_LOAD_BUTTON) {
@@ -1851,6 +1863,30 @@ ActionResult InstrumentClipView::padAction(int32_t x, int32_t y, int32_t velocit
 		}
 	}
 
+	// Note Landscape: both sidebar columns are taken over in pattern-morph mode (left = lane
+	// selectors, right = knob-position map / save).
+	if (noteLandscapeMode && x >= kDisplayWidth) {
+		if (sdRoutineLock) {
+			return ActionResult::REMIND_ME_OUTSIDE_CARD_ROUTINE;
+		}
+		if (velocity) {
+			return noteLandscapeSidebarPadAction(x, y);
+		}
+		// Releasing a left-column slot pad (pattern or index) ends the reposition hold.
+		if (x == kDisplayWidth && noteLandscapeReposSlot != -1) {
+			noteLandscapeReposPadReleased();
+			uiNeedsRendering(this);
+		}
+		return ActionResult::DEALT_WITH;
+	}
+
+	// Note Landscape: the OUTPUT lane (the live morph) is read-only — swallow edit-pad presses. Select
+	// a saved pattern's pad to edit it (its notes load into the grid, editable). Index lane jumps to
+	// Automation View, so it isn't a case here.
+	if (noteLandscapeMode && noteLandscapeView == -1 && x < kDisplayWidth) {
+		return ActionResult::DEALT_WITH;
+	}
+
 	// Edit pad action...
 	if (x < kDisplayWidth) {
 		if (sdRoutineLock) {
@@ -1885,6 +1921,11 @@ ActionResult InstrumentClipView::padAction(int32_t x, int32_t y, int32_t velocit
 doRegularEditPadActionProbably:
 			if (isUIModeWithinRange(editPadActionUIModes)) {
 				editPadAction(velocity, y, x, currentSong->xZoom[NAVIGATION_CLIP]);
+				// Note Landscape: a grid edit while a pattern is selected feeds straight into the played
+				// morph (the grid stays on the pattern).
+				if (noteLandscapeMode && noteLandscapeView >= 0) {
+					commitNoteLandscapeEdit();
+				}
 			}
 		}
 	}
@@ -5840,6 +5881,10 @@ bool InstrumentClipView::renderSidebar(uint32_t whichRows, RGB image[][kDisplayW
 		return true;
 	}
 
+	if (noteLandscapeMode) {
+		return renderNoteLandscapeSidebar(whichRows, image, occupancyMask);
+	}
+
 	int32_t macroColumn = kDisplayWidth;
 	bool armed = false;
 	for (int32_t i = 0; i < kDisplayHeight; i++) {
@@ -7048,6 +7093,13 @@ void InstrumentClipView::graphicsRoutine() {
 
 	uint8_t colours[kDisplayHeight];
 	uint8_t nonMutedColour = clip->getCurrentlyRecordingLinearly() ? 2 : 0;
+	// Note Landscape: when a saved pattern is selected (not the live output), the grid shows notes that
+	// AREN'T what's playing — dim the playhead column to signal that. Colour 3 is only honoured by the
+	// SLOW flash cursor (the default); under the FAST cursor it falls back to a normal playhead, since
+	// that path renders via flashMainPad and doesn't carry the dim colour. Cosmetic only.
+	if (noteLandscapeMode && noteLandscapeView >= 0) {
+		nonMutedColour = 3;
+	}
 
 	int32_t noteRowIndex;
 	NoteRow* noteRow = nullptr;
@@ -7211,6 +7263,8 @@ void InstrumentClipView::performActualRender(uint32_t whichRows, RGB* image,
 	char modelStackMemory[MODEL_STACK_MAX_SIZE];
 	ModelStackWithTimelineCounter* modelStack = currentSong->setupModelStackWithCurrentClip(modelStackMemory);
 
+	// Note Landscape renders straight from the clip's live NoteRows: the OUTPUT lane materializes the
+	// morph there, a selected PATTERN lane is loaded there for editing. No special-casing needed here.
 	for (int32_t yDisplay = 0; yDisplay < kDisplayHeight; yDisplay++) {
 
 		if (whichRows & (1 << yDisplay)) {
@@ -7281,7 +7335,612 @@ void InstrumentClipView::dontDeleteNotesOnDepress() {
 	}
 }
 
+// Note Landscape sidebar helpers (defined below).
+static RGB noteLandscapeColourForPosition(int32_t position);
+
+void InstrumentClipView::toggleNoteLandscapeMode() {
+	InstrumentClip* clip = getCurrentInstrumentClip();
+	NoteLandscape* nl = clip->noteLandscape;
+	// Leaving the mode while a pattern was loaded for editing: commit its edits and resume the morph.
+	if (nl && nl->editingSlot >= 0) {
+		if (nl->patterns[nl->editingSlot].used) {
+			nl->patterns[nl->editingSlot].captureFrom(clip);
+		}
+		nl->editingSlot = -1;
+		nl->invalidate();
+		nl->freeMorphShadow();
+		realizeNoteLandscapeNow();
+	}
+	noteLandscapeMode = !noteLandscapeMode;
+	// Initial lane follows where the mode was entered: from Automation View (cross-screen on the index
+	// param) start on the index lane (its curve is already shown); from the note grid start on output.
+	noteLandscapeView = (getRootUI() == &automationView) ? -2 : -1;
+	noteLandscapeReposSlot = -1;
+	indicator_leds::setLedState(IndicatorLED::CROSS_SCREEN_EDIT, noteLandscapeMode);
+	display->popupTextTemporary(noteLandscapeMode ? "NOTE LANDSCAPE" : "EXIT LANDSCAPE");
+	if (!noteLandscapeMode) {
+		setLedStates(); // restore the CROSS-SCREEN LED to its real (wrap-edit) state
+	}
+	uiNeedsRendering(getRootUI());
+}
+
+void InstrumentClipView::noteLandscapeAdjustIndex(int32_t whichModEncoder, int32_t offset) {
+	InstrumentClip* clip = getCurrentInstrumentClip();
+	NoteLandscape* nl = clip->noteLandscape;
+	if (!nl) {
+		display->popupTextTemporary("NO PATTERNS");
+		return;
+	}
+	int32_t step = kNoteLandscapeIndexMax / 64; // ~64 detents across the full sweep
+
+	// The index pad is held (reposSlot == -2) → reposition the INDEX (mirrors Param Landscape's held
+	// index pad): LEFT knob = neutral drag — move the index and carry any pattern it's parked on by the
+	// same delta, so what's playing is preserved. RIGHT knob = plain scrub (falls through below).
+	if (noteLandscapeReposSlot == -2 && whichModEncoder == 0) {
+		int32_t newIndex = nl->currentIndex + offset * step;
+		if (newIndex < 0) {
+			newIndex = 0;
+		}
+		if (newIndex > kNoteLandscapeIndexMax) {
+			newIndex = kNoteLandscapeIndexMax;
+		}
+		int32_t actualDelta = newIndex - nl->currentIndex;
+		for (int32_t s = 0; s < kNoteLandscapeMaxPatterns; s++) {
+			if (!nl->patterns[s].used) {
+				continue;
+			}
+			int32_t d = nl->currentIndex - nl->patterns[s].position;
+			if (d < 0) {
+				d = -d;
+			}
+			if (d < kNoteLandscapePlateau) {
+				nl->repositionSlot(s, nl->patterns[s].position + actualDelta); // carry the parked pattern
+			}
+		}
+		clip->setNoteLandscapeIndexParam(newIndex);
+		int32_t fromParam = clip->getNoteLandscapeIndexFromParam();
+		nl->currentIndex = (fromParam >= 0) ? fromParam : newIndex;
+		realizeNoteLandscapeNow();
+		display->displayPopup(
+		    (uint8_t)(((int64_t)nl->currentIndex * 50 + kNoteLandscapeIndexMax / 2) / kNoteLandscapeIndexMax));
+		return;
+	}
+
+	// A left pattern pad is held → reposition that pattern instead of scrubbing (mirrors Param
+	// Landscape's held-pad reposition): RIGHT knob = free move (index stays, the morph at the current
+	// index changes as the pattern slides past it); LEFT knob = playback-neutral.
+	if (noteLandscapeReposSlot >= 0 && nl->patterns[noteLandscapeReposSlot].used) {
+		int32_t oldPos = nl->patterns[noteLandscapeReposSlot].position;
+
+		if (whichModEncoder == 1) {
+			// RIGHT = free move.
+			int32_t newPos = std::clamp<int32_t>(oldPos + offset * step, 0, kNoteLandscapeIndexMax);
+			nl->repositionSlot(noteLandscapeReposSlot, newPos);
+			realizeNoteLandscapeNow();
+			display->displayPopup(
+			    (uint8_t)(((int64_t)newPos * 50 + kNoteLandscapeIndexMax / 2) / kNoteLandscapeIndexMax));
+			return;
+		}
+
+		// LEFT = playback-neutral: hold the index's FRACTIONAL position within its bracket constant, so
+		// what's playing is preserved — the pattern just slides toward its neighbour and the index keeps
+		// the same % of the way across (it never crosses past the far bracket). Mirrors Param Landscape's
+		// neutralNodeDrag. Find the pattern's neighbours (rails at the ends) and clamp strictly between
+		// them (no swap — a swap would change which patterns bracket the index, breaking neutrality).
+		int32_t leftNeighbour = 0;
+		int32_t rightNeighbour = kNoteLandscapeIndexMax;
+		for (int32_t s = 0; s < kNoteLandscapeMaxPatterns; s++) {
+			if (s == noteLandscapeReposSlot || !nl->patterns[s].used) {
+				continue;
+			}
+			int32_t pos = nl->patterns[s].position;
+			if (pos < oldPos && pos > leftNeighbour) {
+				leftNeighbour = pos;
+			}
+			if (pos > oldPos && pos < rightNeighbour) {
+				rightNeighbour = pos;
+			}
+		}
+		int32_t newPos = std::clamp<int32_t>(oldPos + offset * step, leftNeighbour + 1, rightNeighbour - 1);
+		if (newPos == oldPos) {
+			display->displayPopup("END"); // can't move further without changing the output
+			return;
+		}
+
+		int32_t idx = nl->currentIndex;
+		int32_t newIndex;
+		int32_t d = idx - oldPos;
+		if (d < 0) {
+			d = -d;
+		}
+		if (d < kNoteLandscapePlateau) {
+			newIndex = idx + (newPos - oldPos); // parked on the pattern → translate with it
+		}
+		else if (idx < oldPos && idx >= leftNeighbour && oldPos > leftNeighbour) {
+			// Index in the pattern's LEFT segment (pattern is the right bracket): hold the fraction from
+			// the fixed left neighbour.
+			newIndex =
+			    leftNeighbour
+			    + (int32_t)(((int64_t)(idx - leftNeighbour) * (newPos - leftNeighbour)) / (oldPos - leftNeighbour));
+		}
+		else if (idx > oldPos && idx <= rightNeighbour && rightNeighbour > oldPos) {
+			// Index in the pattern's RIGHT segment (pattern is the left bracket): hold the fraction from
+			// the fixed right neighbour.
+			newIndex =
+			    rightNeighbour
+			    - (int32_t)(((int64_t)(rightNeighbour - idx) * (rightNeighbour - newPos)) / (rightNeighbour - oldPos));
+		}
+		else {
+			newIndex = idx; // the index doesn't touch this pattern — moving it doesn't change the output
+		}
+		newIndex = std::clamp<int32_t>(newIndex, 0, kNoteLandscapeIndexMax);
+
+		nl->repositionSlot(noteLandscapeReposSlot, newPos);
+		clip->setNoteLandscapeIndexParam(newIndex);
+		int32_t fromParam = clip->getNoteLandscapeIndexFromParam();
+		nl->currentIndex = (fromParam >= 0) ? fromParam : newIndex;
+		realizeNoteLandscapeNow();
+		display->displayPopup((uint8_t)(((int64_t)newPos * 50 + kNoteLandscapeIndexMax / 2) / kNoteLandscapeIndexMax));
+		return;
+	}
+
+	// Index scrub. On synth/kit (the index is a real automatable param) drive it through the canonical
+	// knob→param write so it does takeover/pickup, RECORDS automation when armed, and sends MIDI
+	// feedback — exactly like any other automatable param. (Replicates View::modEncoderAction_
+	// existentParam, which is private, via its public pieces.)
+	if (clip->hasNoteLandscapeIndexParam()) {
+		using Kind = deluge::modulation::params::Kind;
+		char modelStackMemory[MODEL_STACK_MAX_SIZE];
+		ModelStackWithTimelineCounter* modelStack = currentSong->setupModelStackWithCurrentClip(modelStackMemory);
+		Kind kind = (clip->output->type == OutputType::KIT) ? Kind::UNPATCHED_GLOBAL : Kind::UNPATCHED_SOUND;
+		ModelStackWithAutoParam* mswap = clip->output->getModelStackWithParam(
+		    modelStack, clip, deluge::modulation::params::UNPATCHED_NOTE_LANDSCAPE_INDEX, kind, getAffectEntire(),
+		    false);
+		if (mswap && mswap->autoParam) {
+			// Read AND write at the same modPos/modLength as the canonical gold-knob path
+			// (View::modEncoderAction_existentParam). Reading at one position and writing at another (we
+			// used to write at pos 0) makes the knob read back a different value than it set during
+			// playback — the value sticks or even drops by 1 while turning steadily up.
+			int32_t value = mswap->autoParam->getValuePossiblyAtPos(view.modPos, mswap); // current (knob ref)
+			int32_t knobPos = mswap->paramCollection->paramValueToKnobPos(value, mswap);
+			int32_t newKnobPos = view.calculateKnobPosForModEncoderTurn(kind, knobPos, offset);
+			if (newKnobPos != knobPos) {
+				view.sendMidiFollowFeedback(mswap, newKnobPos);
+				int32_t newValue = mswap->paramCollection->knobPosToParamValue(newKnobPos, mswap);
+				// Sets the value now and records a live automation node when recording is armed (the
+				// standard gold-knob live-record path).
+				mswap->autoParam->setValuePossiblyForRegion(newValue, mswap, view.modPos, view.modLength);
+				view.potentiallyMakeItHarderToTurnKnob(whichModEncoder, mswap, newKnobPos);
+			}
+			// Sync the engine index from the (now-updated) param. Selection is STICKY — scrubbing the
+			// index never changes which lane the grid shows (mirrors Param Landscape: the viewed lane is
+			// independent of the knob). realize() rebakes the morph only when the OUTPUT lane is live; it
+			// self-suspends while a pattern is loaded for editing, so the edited grid stays put.
+			int32_t fromParam = clip->getNoteLandscapeIndexFromParam();
+			if (fromParam >= 0) {
+				nl->currentIndex = fromParam;
+			}
+			realizeNoteLandscapeNow();
+			// Display the knob position on the same 0..50 scale Automation View uses (mirrors its readout),
+			// straight from the knob position so it doesn't jitter from param↔index rounding.
+			display->displayPopup((uint8_t)(((newKnobPos + kKnobPosOffset) * 50 + (kMaxKnobPos / 2)) / kMaxKnobPos));
+			return;
+		}
+	}
+
+	// Fallback (MIDI/CV: no param) — plain scrub of the engine's own index.
+	int64_t v = (int64_t)nl->currentIndex + (int64_t)offset * step;
+	if (v < 0) {
+		v = 0;
+	}
+	if (v > kNoteLandscapeIndexMax) {
+		v = kNoteLandscapeIndexMax;
+	}
+	if ((int32_t)v == nl->currentIndex) {
+		return;
+	}
+	noteLandscapeMoveIndexTo((int32_t)v); // selection is sticky — don't change the viewed lane
+	display->displayPopup(
+	    (uint8_t)(((int64_t)nl->currentIndex * 50 + kNoteLandscapeIndexMax / 2) / kNoteLandscapeIndexMax)); // 0..50
+}
+
+void InstrumentClipView::realizeNoteLandscapeNow() {
+	InstrumentClip* clip = getCurrentInstrumentClip();
+	if (!clip->noteLandscape) {
+		return;
+	}
+	// Re-bake the morph immediately (UI thread and the sequencer share the main loop on the Deluge,
+	// so mutating notes here is safe even while playing — same as ordinary note editing). realize()
+	// stops any sounding note in each row before rewriting, and calls expectEvent() so the
+	// sequencer re-scans. Notes already passed this loop simply won't retrigger.
+	char modelStackMemory[MODEL_STACK_MAX_SIZE];
+	ModelStackWithTimelineCounter* modelStack = currentSong->setupModelStackWithCurrentClip(modelStackMemory);
+	clip->noteLandscape->realize(modelStack);
+	uiNeedsRendering(this);
+}
+
+void InstrumentClipView::noteLandscapeMoveIndexTo(int32_t newIndex) {
+	InstrumentClip* clip = getCurrentInstrumentClip();
+	NoteLandscape* nl = clip->noteLandscape;
+	if (!nl) {
+		return;
+	}
+	if (newIndex < 0) {
+		newIndex = 0;
+	}
+	if (newIndex > kNoteLandscapeIndexMax) {
+		newIndex = kNoteLandscapeIndexMax;
+	}
+
+	// Mirror the move into the automatable index param so Automation View, serialization and MIDI
+	// feedback all track the knob, then read currentIndex BACK from the param so it exactly matches
+	// what the loop-boundary hook will read (avoids a spurious re-bake every loop from int↔param
+	// rounding). On clips without the param (kit/MIDI) fall back to the requested index.
+	clip->setNoteLandscapeIndexParam(newIndex);
+	int32_t fromParam = clip->getNoteLandscapeIndexFromParam();
+	nl->currentIndex = (fromParam >= 0) ? fromParam : newIndex;
+
+	// Re-bake the morph for the OUTPUT lane; realize() self-suspends while a pattern is loaded for
+	// editing (editingSlot), so the edited grid stays put while the index still records automation.
+	// uiNeedsRendering always fires so the sidebar's index marker follows.
+	realizeNoteLandscapeNow();
+}
+
+// Green→red gradient by an arbitrary knob position (a pattern's identity colour in the sidebar).
+static RGB noteLandscapeColourForPosition(int32_t position) {
+	int32_t frac = (int32_t)(((int64_t)position * 255) / kNoteLandscapeIndexMax);
+	if (frac < 0) {
+		frac = 0;
+	}
+	if (frac > 255) {
+		frac = 255;
+	}
+	return RGB((uint8_t)frac, (uint8_t)(255 - frac), 0);
+}
+
+void InstrumentClipView::selectNoteLandscapeLane(int32_t lane) {
+	InstrumentClip* clip = getCurrentInstrumentClip();
+	NoteLandscape* nl = clip->noteLandscape;
+	if (!nl) {
+		return;
+	}
+	char modelStackMemory[MODEL_STACK_MAX_SIZE];
+	ModelStackWithTimelineCounter* modelStack = currentSong->setupModelStackWithCurrentClip(modelStackMemory);
+
+	// Re-selecting the pattern already being edited is a no-op (keep its in-progress edits live).
+	if (lane >= 0 && nl->editingSlot == lane) {
+		noteLandscapeView = lane;
+		uiNeedsRendering(this);
+		return;
+	}
+
+	// Leaving an edited pattern: commit its grid edits back into the slot, end the edit session (frees
+	// the frozen morph shadow). Mirrors Param Landscape, where switching lanes redirects the grid.
+	if (nl->editingSlot >= 0) {
+		if (nl->patterns[nl->editingSlot].used) {
+			nl->patterns[nl->editingSlot].captureFrom(clip);
+		}
+		nl->editingSlot = -1;
+		nl->invalidate();
+		nl->freeMorphShadow();
+	}
+
+	// Output and saved-pattern lanes show/edit NOTES, so they live in the note grid; the index lane
+	// shows its automation curve, so it lives in Automation View. Switch the root UI to match the lane.
+	if (lane >= 0) {
+		// A saved pattern → edit it. First rebake the morph into the live rows and freeze a snapshot of
+		// it (the notes playback will keep sounding while we edit), THEN load the pattern into the live
+		// rows for editing. realize() stays suspended so the grid edits never reach playback.
+		realizeNoteLandscapeNow();    // live rows = morph at the current index
+		nl->captureMorphShadow(clip); // freeze it for playback
+		nl->editingSlot = lane;
+		nl->loadPatternIntoClip(lane, modelStack); // live rows = the editable pattern
+		noteLandscapeView = lane;
+		if (getRootUI() == &automationView) {
+			changeRootUI(this); // pattern editing needs the note grid
+		}
+		else {
+			uiNeedsRendering(this);
+		}
+		return;
+	}
+
+	if (lane == -1) {
+		// Output → read-only live morph: resume realize() and rebake at the current index.
+		noteLandscapeView = -1;
+		realizeNoteLandscapeNow();
+		if (getRootUI() == &automationView) {
+			changeRootUI(this); // the morph output is notes — show the note grid
+		}
+		return;
+	}
+
+	// lane == -2: index → its automation lane. The index param's "landscape" IS Note Landscape, so
+	// show its automation curve in Automation View with the Note Landscape sidebars (cross-screen there
+	// already entered the mode). MIDI/CV clips have no param — fall back to live output.
+	noteLandscapeView = -2;
+	if (clip->hasNoteLandscapeIndexParam()) {
+		using Kind = deluge::modulation::params::Kind;
+		Kind kind = (clip->output->type == OutputType::KIT) ? Kind::UNPATCHED_GLOBAL : Kind::UNPATCHED_SOUND;
+		automationView.automationParamType = AutomationParamType::PER_SOUND;
+		clip->lastSelectedParamKind = kind;
+		clip->lastSelectedParamID = deluge::modulation::params::UNPATCHED_NOTE_LANDSCAPE_INDEX;
+		clip->lastSelectedParamShortcutX = 15;
+		clip->lastSelectedParamShortcutY = 4;
+		// Match lastSelectedOutputType so Automation View's entry init doesn't treat this as a clip-type
+		// change and reset the selection back to the overview (initializeView()).
+		clip->lastSelectedOutputType = clip->output->type;
+		if (getRootUI() == &automationView) {
+			uiNeedsRendering(&automationView); // already there — just refresh the curve + sidebars
+		}
+		else {
+			changeRootUI(&automationView);
+		}
+	}
+	else {
+		realizeNoteLandscapeNow();
+	}
+}
+
+ActionResult InstrumentClipView::noteLandscapeSidebarPadAction(int32_t x, int32_t y) {
+	using namespace deluge::hid::button;
+	InstrumentClip* clip = getCurrentInstrumentClip();
+	bool save = Buttons::isButtonPressed(SAVE);
+	bool shift = Buttons::isShiftButtonPressed();
+	NoteLandscape* nl = clip->noteLandscape;
+
+	if (x == kDisplayWidth + 1) {
+		// RIGHT column = knob-position MAP. SAVE captures a new pattern at this row's position. A plain
+		// tap CYCLES the selection through every lane whose marker lands on this row — the index marker
+		// (if it's here) first, then any co-located saved patterns by ascending position, wrapping.
+		// Mirrors Param Landscape's map-tap cycle (automation_view "Plain map tap: cycle the view").
+		int32_t pos = NoteLandscape::positionForRow(y);
+		if (save) {
+			captureNoteLandscapeAt(pos);
+		}
+		else if (nl) {
+			int32_t targets[1 + kNoteLandscapeMaxPatterns];
+			int32_t numTargets = 0;
+			// The live index marker leads the cycle if it sits on this row.
+			if (NoteLandscape::rowForPosition(nl->currentIndex) == y) {
+				targets[numTargets++] = -2; // index lane
+			}
+			// Then saved patterns on this row, lowest position first.
+			int32_t usedSlots[kNoteLandscapeMaxPatterns];
+			int32_t n = nl->usedSlotsByPosition(usedSlots);
+			for (int32_t i = 0; i < n; i++) {
+				if (NoteLandscape::rowForPosition(nl->patterns[usedSlots[i]].position) == y) {
+					targets[numTargets++] = usedSlots[i];
+				}
+			}
+			if (numTargets) {
+				int32_t pick = targets[0];
+				for (int32_t t = 0; t < numTargets; t++) {
+					if (targets[t] == noteLandscapeView) {
+						pick = targets[(t + 1) % numTargets];
+						break;
+					}
+				}
+				selectNoteLandscapeLane(pick);
+			}
+		}
+	}
+	else {
+		// LEFT column = lane selectors: index pad (top), output pad (2nd), saved patterns stacked from
+		// the bottom by ascending position. A plain tap selects the lane for viewing & editing.
+		if (y == kDisplayHeight - 1) {
+			// Index pad: SAVE captures a new pattern at the CURRENT index (arbitrary position); tap jumps
+			// to the index's automation editor (Automation View on the index param).
+			if (save) {
+				NoteLandscape* n2 = clip->getOrCreateNoteLandscape();
+				captureNoteLandscapeAt(n2 ? n2->currentIndex : 0);
+			}
+			else {
+				selectNoteLandscapeLane(-2);
+				// Arm index reposition: holding this pad + turning a knob moves the index (LEFT neutral,
+				// RIGHT plain) — see noteLandscapeAdjustIndex. A plain tap already selected the index lane.
+				noteLandscapeReposSlot = -2;
+				return ActionResult::DEALT_WITH; // may have changed root UI
+			}
+		}
+		else if (y == kDisplayHeight - 2) {
+			selectNoteLandscapeLane(-1); // output (read-only live morph)
+		}
+		else {
+			int32_t usedSlots[kNoteLandscapeMaxPatterns];
+			int32_t n = nl ? nl->usedSlotsByPosition(usedSlots) : 0;
+			if (y < n) {
+				int32_t slot = usedSlots[y];
+				if (save && shift) {
+					bool wasEditing = (nl->editingSlot == slot);
+					nl->clearSlot(slot);
+					if (noteLandscapeView == slot || wasEditing) {
+						nl->editingSlot = -1;
+						nl->freeMorphShadow();
+						noteLandscapeView = -1; // was viewing/editing the deleted pattern → back to output
+						realizeNoteLandscapeNow();
+					}
+					display->popupTextTemporary("CLEAR");
+				}
+				else if (save) {
+					// SAVE on a pattern pad = OVERWRITE that pattern with the current notes (mirrors
+					// Param Landscapes' overwriteLandscapeNodeWithOutput); position is unchanged. Then
+					// select it for editing.
+					nl->patterns[slot].captureFrom(clip);
+					nl->invalidate();
+					selectNoteLandscapeLane(slot);
+					display->popupTextTemporary("SAVED");
+				}
+				else if (Buttons::isButtonPressed(LOAD)) {
+					// LOAD + pattern pad = jump the index to this pattern's position (mirrors Param
+					// Landscape's LOAD-to-park). Doesn't change the selected/edited lane.
+					noteLandscapeMoveIndexTo(nl->patterns[slot].position);
+				}
+				else {
+					// Plain tap = SELECT this pattern for viewing & editing (loaded into the clip's notes).
+					// Arm reposition: holding this pad + turning a knob moves it (LEFT = playback-neutral,
+					// RIGHT = free) — see noteLandscapeAdjustIndex.
+					selectNoteLandscapeLane(slot);
+					noteLandscapeReposSlot = slot;
+				}
+			}
+		}
+	}
+	uiNeedsRendering(this);
+	return ActionResult::DEALT_WITH;
+}
+
+void InstrumentClipView::captureNoteLandscapeAt(int32_t position) {
+	InstrumentClip* clip = getCurrentInstrumentClip();
+	NoteLandscape* n2 = clip->getOrCreateNoteLandscape();
+	if (!n2) {
+		display->popupTextTemporary("RAM");
+		return;
+	}
+	if (position < 0) {
+		position = 0;
+	}
+	if (position > kNoteLandscapeIndexMax) {
+		position = kNoteLandscapeIndexMax;
+	}
+	// Fold edits of the pattern currently loaded for editing back into it first (so they aren't lost).
+	if (n2->editingSlot >= 0 && n2->patterns[n2->editingSlot].used) {
+		n2->patterns[n2->editingSlot].captureFrom(clip);
+		n2->invalidate();
+	}
+	// SAVE never overwrites — like Param Landscapes it creates a NEW pattern, nudged to the nearest
+	// FREE step (overwrite is the separate SAVE-on-a-pattern-pad gesture). Step grid mirrors the
+	// dither resolution; reposition fine-tunes off-grid afterward.
+	constexpr int32_t kSteps = kNoteLandscapeDitherLevels;
+	int32_t step = kNoteLandscapeIndexMax / kSteps;
+	int32_t targetStep = (position + step / 2) / step;
+	if (targetStep < 0) {
+		targetStep = 0;
+	}
+	if (targetStep > kSteps) {
+		targetStep = kSteps;
+	}
+	int32_t freePos = -1;
+	for (int32_t distance = 0; distance <= kSteps && freePos < 0; distance++) {
+		for (int32_t sign = 1; sign >= -1; sign -= 2) {
+			int32_t s = targetStep + distance * sign;
+			if (s >= 0 && s <= kSteps) {
+				bool occupied = false;
+				for (int32_t k = 0; k < kNoteLandscapeMaxPatterns; k++) {
+					if (n2->patterns[k].used && ((n2->patterns[k].position + step / 2) / step) == s) {
+						occupied = true;
+						break;
+					}
+				}
+				if (!occupied) {
+					freePos = (s >= kSteps) ? kNoteLandscapeIndexMax : (s * step);
+					break;
+				}
+			}
+			if (distance == 0) {
+				break; // both signs are the same step at distance 0
+			}
+		}
+	}
+	if (freePos < 0) {
+		display->popupTextTemporary(deluge::l10n::get(deluge::l10n::String::STRING_FOR_NOTE_LANDSCAPE_MAX_PATTERNS));
+		return;
+	}
+	position = freePos;
+	int32_t slot = n2->captureAtPosition(clip, position);
+	if (slot < 0) {
+		display->popupTextTemporary(deluge::l10n::get(deluge::l10n::String::STRING_FOR_NOTE_LANDSCAPE_MAX_PATTERNS));
+		return;
+	}
+	// Park the index on the saved pattern; mirror into the param, read back for consistency.
+	clip->setNoteLandscapeIndexParam(position);
+	int32_t fromParam = clip->getNoteLandscapeIndexFromParam();
+	n2->currentIndex = (fromParam >= 0) ? fromParam : position;
+	selectNoteLandscapeLane(slot); // select the new pattern for viewing & editing
+	display->popupTextTemporary("SAVED");
+}
+
+void InstrumentClipView::commitNoteLandscapeEdit() {
+	InstrumentClip* clip = getCurrentInstrumentClip();
+	if (clip->noteLandscape) {
+		clip->noteLandscape->commitEdit(clip);
+	}
+}
+
+void InstrumentClipView::noteLandscapeReposPadReleased() {
+	noteLandscapeReposSlot = -1;
+}
+
+bool InstrumentClipView::renderNoteLandscapeSidebar(uint32_t whichRows, RGB image[][kDisplayWidth + kSideBarWidth],
+                                                    uint8_t occupancyMask[][kDisplayWidth + kSideBarWidth]) {
+	InstrumentClip* clip = getCurrentInstrumentClip();
+	NoteLandscape* nl = clip->noteLandscape;
+	// Read the live index straight from the automatable param when there is one, so the marker tracks
+	// the knob immediately (even stopped / scrubbing in Automation View) rather than lagging the
+	// per-tick engine sync.
+	int32_t index = nl ? nl->currentIndex : 0;
+	if (clip->hasNoteLandscapeIndexParam()) {
+		int32_t fromParam = clip->getNoteLandscapeIndexFromParam();
+		if (fromParam >= 0) {
+			index = fromParam;
+		}
+	}
+	int32_t indexRow = NoteLandscape::rowForPosition(index);
+
+	int32_t usedSlots[kNoteLandscapeMaxPatterns];
+	int32_t n = nl ? nl->usedSlotsByPosition(usedSlots) : 0;
+
+	// Pre-plot the RIGHT column (knob-position map): each saved pattern onto the row its (arbitrary)
+	// position falls on, in its position colour; the row whose pattern is being viewed/repositioned
+	// shows white.
+	RGB rightCol[kDisplayHeight];
+	for (int32_t r = 0; r < kDisplayHeight; r++) {
+		rightCol[r] = colours::black;
+	}
+	for (int32_t k = 0; k < n; k++) {
+		int32_t slot = usedSlots[k];
+		int32_t r = NoteLandscape::rowForPosition(nl->patterns[slot].position);
+		bool highlit = (noteLandscapeView == slot) || (noteLandscapeReposSlot == slot);
+		rightCol[r] = highlit ? colours::white : noteLandscapeColourForPosition(nl->patterns[slot].position);
+	}
+
+	for (int32_t y = 0; y < kDisplayHeight; y++) {
+		if (!(whichRows & (1 << y))) {
+			continue;
+		}
+
+		// LEFT column = lane selectors: index pad (top, blue), output pad (violet), saved patterns
+		// stacked from the bottom by ascending position in their colours; viewed/held = white.
+		RGB left = colours::black;
+		if (y == kDisplayHeight - 1) {
+			left = (noteLandscapeView == -2) ? colours::white : colours::blue;
+		}
+		else if (y == kDisplayHeight - 2) {
+			left = (noteLandscapeView == -1) ? colours::white : RGB(120, 0, 200);
+		}
+		else if (y < n) {
+			int32_t slot = usedSlots[y];
+			bool highlit = (noteLandscapeView == slot) || (noteLandscapeReposSlot == slot);
+			left = highlit ? colours::white : noteLandscapeColourForPosition(nl->patterns[slot].position);
+		}
+		image[y][kDisplayWidth] = left;
+
+		// RIGHT column: the pre-plotted map, but the live index ALWAYS shows as blue wherever it is —
+		// even when it shares a pad with a saved pattern (parity with Param Landscape, where the index
+		// marker leads). The pattern colour shows on every other row.
+		RGB right = (y == indexRow) ? colours::blue : rightCol[y];
+		image[y][kDisplayWidth + 1] = right;
+	}
+	return true;
+}
+
 void InstrumentClipView::modEncoderAction(int32_t whichModEncoder, int32_t offset) {
+	// Note Landscape: the gold encoder drives the morph index while in pattern-morph mode.
+	if (noteLandscapeMode) {
+		noteLandscapeAdjustIndex(whichModEncoder, offset);
+		return;
+	}
+
 	dontDeleteNotesOnDepress();
 
 	InstrumentClip* clip = getCurrentInstrumentClip();
