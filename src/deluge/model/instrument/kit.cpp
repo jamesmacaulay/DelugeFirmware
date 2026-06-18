@@ -2002,6 +2002,13 @@ gotParamManager:
 ModelStackWithAutoParam* Kit::getModelStackWithParam(ModelStackWithTimelineCounter* modelStack, Clip* clip,
                                                      int32_t paramID, params::Kind paramKind, bool affectEntire,
                                                      bool useMenuStack) {
+	// The Note Landscape morph index is a single CLIP-level control (read from clip->paramManager by
+	// NoteLandscape::realize), never per-drum — so always resolve it to the kit (clip) paramManager,
+	// regardless of affect-entire. Otherwise its automation would land in a drum's paramManager and
+	// the morph would never see it.
+	if (paramID == params::UNPATCHED_NOTE_LANDSCAPE_INDEX) {
+		return getModelStackWithParamForKit(modelStack, clip, paramID, params::Kind::UNPATCHED_GLOBAL, useMenuStack);
+	}
 	if (affectEntire) {
 		return getModelStackWithParamForKit(modelStack, clip, paramID, paramKind, useMenuStack);
 	}

@@ -109,6 +109,9 @@ void ModControllableAudio::initParams(ParamManager* paramManager) {
 	unpatchedParams->params[params::UNPATCHED_TREBLE].setCurrentValueBasicForSetup(0);
 	unpatchedParams->params[params::UNPATCHED_BASS_FREQ].setCurrentValueBasicForSetup(0);
 	unpatchedParams->params[params::UNPATCHED_TREBLE_FREQ].setCurrentValueBasicForSetup(0);
+	// Note Landscape morph index defaults to 0 (knob bottom = INT32_MIN), not mid-scale. Shared so
+	// this covers both synth (Sound) and kit (GlobalEffectable).
+	unpatchedParams->params[params::UNPATCHED_NOTE_LANDSCAPE_INDEX].setCurrentValueBasicForSetup(-2147483648);
 
 	unpatchedParams->params[params::UNPATCHED_ARP_GATE].setCurrentValueBasicForSetup(0);
 	unpatchedParams->params[params::UNPATCHED_NOTE_PROBABILITY].setCurrentValueBasicForSetup(2147483647);
@@ -497,6 +500,12 @@ void ModControllableAudio::writeParamAttributesToFile(Serializer& writer, ParamM
 
 	unpatchedParams->writeParamAsAttribute(writer, "stutterRate", params::UNPATCHED_STUTTER_RATE, writeAutomation,
 	                                       false, valuesForOverride);
+	// Note Landscape morph index: song-only (its value/automation belongs with the clip, not the
+	// shared preset), so only emit it in the automation (song) context.
+	if (writeAutomation) {
+		unpatchedParams->writeParamAsAttribute(writer, "noteLandscapeIndex", params::UNPATCHED_NOTE_LANDSCAPE_INDEX,
+		                                       writeAutomation, false, valuesForOverride);
+	}
 	unpatchedParams->writeParamAsAttribute(writer, "sampleRateReduction", params::UNPATCHED_SAMPLE_RATE_REDUCTION,
 	                                       writeAutomation, false, valuesForOverride);
 	unpatchedParams->writeParamAsAttribute(writer, "bitCrush", params::UNPATCHED_BITCRUSHING, writeAutomation, false,
@@ -588,6 +597,12 @@ bool ModControllableAudio::readParamTagFromFile(Deserializer& reader, char const
 			}
 		}
 		reader.exitTag("equalizer", true);
+	}
+
+	else if (!strcmp(tagName, "noteLandscapeIndex")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_NOTE_LANDSCAPE_INDEX,
+		                           readAutomationUpToPos);
+		reader.exitTag("noteLandscapeIndex");
 	}
 
 	else if (!strcmp(tagName, "stutterRate")) {
